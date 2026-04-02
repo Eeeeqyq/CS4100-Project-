@@ -59,6 +59,8 @@ Main implementation files:
 - `demo.py`
 - `simulate_user.py`
 - `README.md`
+- `docs/TA_DEFENSE_GUIDE.md`
+- `docs/TA_QA_SHEET.md`
 
 ## Current Split Discipline
 
@@ -299,6 +301,11 @@ After any meaningful change:
 1. update this file
 2. update `README.md` if setup, commands, outputs, or public behavior changed
 3. mention if metrics are stale because retraining was not rerun
+
+Current study/defense docs:
+
+- `docs/TA_DEFENSE_GUIDE.md` is the full technical walkthrough for TA prep
+- `docs/TA_QA_SHEET.md` is the short speaking-answer sheet for likely challenge questions
 
 ## Next High-Value Improvements
 
