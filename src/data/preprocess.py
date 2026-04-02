@@ -562,10 +562,14 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         PIPELINE_CONFIG["pmemo_tempo_clip"][0],
         PIPELINE_CONFIG["pmemo_tempo_clip"][1],
     )
-    merged["bucket_hint"] = merged.apply(
-        lambda row: get_action_bucket(row["valence_01"], row["energy"], row["tempo"]),
-        axis=1,
-    )
+    # Use PMEmo-internal tempo ranking for soft bucket hints. The transferred
+    # absolute tempo scale is weak, but relative tempo still helps diversify
+    # retrieval without treating PMEmo as hard policy supervision.
+    merged["tempo_pctl"] = merged["tempo"].rank(pct=True, method="average")
+    valence_level = (merged["valence_01"] >= 0.33).astype(int)
+    energy_level = (merged["energy"] >= 0.4).astype(int)
+    tempo_level = (merged["tempo_pctl"] >= 0.5).astype(int)
+    merged["bucket_hint"] = (valence_level * 4 + energy_level * 2 + tempo_level).astype(int)
     merged["action_bucket"] = merged["bucket_hint"].astype(int)
     merged["bucket_is_soft"] = True
 

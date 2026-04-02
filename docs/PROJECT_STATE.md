@@ -28,6 +28,7 @@ Core design:
 - The hierarchical reward model conditions on HMM state, pre-emotion bins, time, activity, and action, with preference alignment blended into acceptance.
 - Synthetic data is optional lower-weight augmentation.
 - Retrieval is deterministic, preference-aware, and treats PMEmo as a soft signal.
+- PMEmo soft bucket hints now use PMEmo-internal tempo percentiles instead of the transferred absolute tempo scale.
 
 ## Raw Data Expectations
 
@@ -186,6 +187,10 @@ Current code constants:
 - `REBALANCE_TEMPERATURE = 0.78`
 - `TIME_SMOOTH = 0.15`
 
+Important caveat:
+
+- `REBALANCE_TEMPERATURE` mainly rebalances synthetic context frequency, not true rare-action support.
+
 Generated synthetic artifacts:
 
 - `data/processed/synthetic_clean.csv`
@@ -198,6 +203,7 @@ Generated synthetic artifacts:
 
 - builds a unified catalog from SiTunes, PMEmo, and Spotify
 - uses PMEmo as a soft retrieval signal, not strong hard-bucket supervision
+- uses PMEmo soft bucket hints generated from PMEmo-internal tempo percentiles
 - ranks tracks using:
   - bucket fit
   - mode/scenario fit
@@ -277,6 +283,13 @@ Observed from current generated artifacts:
   - state-prior: `+0.1645`
   - always-7: `+0.0805`
   - random uniform expected reward: `+0.0778`
+- PMEmo soft bucket distribution after the percentile-tempo fix:
+  - bucket 0: `8`
+  - bucket 2: `37`
+  - bucket 3: `8`
+  - bucket 4: `15`
+  - bucket 6: `307`
+  - bucket 7: `361`
 
 Current qualitative demo behavior:
 
