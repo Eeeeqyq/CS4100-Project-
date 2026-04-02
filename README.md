@@ -240,9 +240,7 @@ CS4100-Project-/
 |       |-- synthetic_clean.csv
 |       `-- synthetic_state_vectors.npy
 |-- docs/
-|   |-- PROJECT_STATE.md
-|   |-- TA_DEFENSE_GUIDE.md
-|   `-- TA_QA_SHEET.md
+|   `-- PROJECT_STATE.md
 |-- models/
 |   |-- hmm.npz
 |   |-- reward_model.json
@@ -540,13 +538,3 @@ The strongest presentation results are qualitative:
 - Zhang, K. et al. (2018). *The PMEmo Dataset for Music Emotion Recognition.*
 - van Hasselt, H. et al. (2016). *Deep Reinforcement Learning with Double Q-learning.*
 - Russell, J. A. (1980). *A circumplex model of affect.*
-
----
-
-## Additional Documentation
-
-For the code-accurate technical walkthrough and TA-defense prep, see:
-
-- [docs/PROJECT_STATE.md](docs/PROJECT_STATE.md)
-- [docs/TA_DEFENSE_GUIDE.md](docs/TA_DEFENSE_GUIDE.md)
-- [docs/TA_QA_SHEET.md](docs/TA_QA_SHEET.md)
