@@ -15,15 +15,16 @@ import numpy as np
 import pandas as pd
 
 from src.data.common import (
-    ACTIVITY_LABELS,
     PMEMO_DIR,
     PROCESSED_DIR,
-    RAW_DIR,
     SITUNES_DIR,
     SPOTIFY_DIR,
-    TIME_LABELS,
+    acceptance_score,
     balanced_user_split,
+    combine_outcomes,
     config_hash,
+    emotion_score,
+    emotional_benefit,
     ensure_dirs,
     file_sha256,
     get_action_bucket,
@@ -46,6 +47,9 @@ PIPELINE_CONFIG = {
     "pmemo_std_cutoff": 0.25,
     "pmemo_energy_blend": 0.55,
     "pmemo_tempo_clip": [55.0, 190.0],
+    "reward_alpha": 0.70,
+    "reward_beta": 0.30,
+    "hr_baseline_shrink": 3.0,
 }
 
 
@@ -66,6 +70,8 @@ def _load_situnes_music() -> pd.DataFrame:
         lambda row: get_action_bucket(row["valence"], row["energy"], row["tempo"]),
         axis=1,
     )
+    music["bucket_hint"] = music["action_bucket"].astype(int)
+    music["bucket_is_soft"] = False
     return music
 
 
@@ -96,6 +102,8 @@ def _clean_stage(
             "valence",
             "tempo",
             "action_bucket",
+            "bucket_hint",
+            "bucket_is_soft",
             "F0final_sma_amean",
             "F0final_sma_stddev",
             "audspec_lengthL1norm_sma_stddev",
@@ -134,10 +142,10 @@ def _clean_stage(
 
     df = pd.concat([df.reset_index(drop=True), summary_df], axis=1)
     df["time_bucket"] = np.asarray(time_buckets, dtype=np.int32)
-    df["time_label"] = df["time_bucket"].map(TIME_LABELS)
     df["weather_bucket"] = np.asarray(weather_buckets, dtype=np.int32)
     df["gps_speed"] = np.asarray(gps_speeds, dtype=np.float32)
     df["dataset_stage"] = stage_name
+    df["pre_emotion_mask"] = 1.0
 
     rewards = [
         reward_from_emotions(
@@ -151,16 +159,180 @@ def _clean_stage(
     ]
     df["reward"] = [reward for reward, _ in rewards]
     df["reward_score"] = [score for _, score in rewards]
+    df["emotion_benefit"] = df["reward_score"].map(emotional_benefit)
+    df["acceptance_score"] = [
+        acceptance_score(
+            preference=row.get("preference"),
+            rating=row.get("rating"),
+        )
+        for _, row in df.iterrows()
+    ]
+    df["combined_reward"] = [
+        combine_outcomes(
+            emotion_value=row["emotion_benefit"],
+            acceptance_value=row["acceptance_score"],
+            alpha=PIPELINE_CONFIG["reward_alpha"],
+            beta=PIPELINE_CONFIG["reward_beta"],
+        )
+        for _, row in df.iterrows()
+    ]
 
-    df["obs_idx"] = np.arange(len(df), dtype=np.int32)
-    df = df.sort_values(["user_id", "timestamp", "inter_id"]).reset_index(drop=True)
-    obs = obs[df["obs_idx"].to_numpy()]
-    df["obs_idx"] = np.arange(len(df), dtype=np.int32)
-
-    return df, obs
+    return df.reset_index(drop=True), obs
 
 
-def clean_situnes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, dict]:
+def build_user_preferences(stage1_clean: pd.DataFrame, situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    music_keep = situnes_music[
+        [
+            "item_id",
+            "music",
+            "singer",
+            "general_genre",
+            "valence",
+            "energy",
+            "tempo",
+            "acousticness",
+            "instrumentalness",
+            "popularity",
+        ]
+    ].copy()
+    stage1_enriched = stage1_clean.merge(music_keep, on="item_id", how="left")
+
+    global_stats = {
+        "valence": float(stage1_enriched["valence"].mean()),
+        "energy": float(stage1_enriched["energy"].mean()),
+        "acousticness": float(stage1_enriched["acousticness"].mean()),
+        "instrumentalness": float(stage1_enriched["instrumentalness"].mean()),
+        "popularity": float(stage1_enriched["popularity"].mean() / 100.0),
+    }
+
+    rows = []
+    profiles = {}
+
+    for user_id, group in stage1_enriched.groupby("user_id"):
+        liked = group[group["rating"] >= 4]
+        disliked = group[group["rating"] <= 2]
+
+        def pref_delta(feature: str) -> float:
+            if not liked.empty and not disliked.empty:
+                value = float(liked[feature].mean() - disliked[feature].mean())
+            elif not liked.empty:
+                value = float(liked[feature].mean() - global_stats[feature])
+            elif not disliked.empty:
+                value = float(global_stats[feature] - disliked[feature].mean())
+            else:
+                value = 0.0
+            return float(np.clip(value, -1.0, 1.0))
+
+        weights = np.clip(group["rating"].to_numpy(dtype=np.float64) - 2.5, -1.5, 2.5)
+        positive_weights = np.clip(group["rating"].to_numpy(dtype=np.float64) - 2.0, 0.0, None) + 0.1
+
+        genre_scores = (
+            group.assign(score=group["rating"] - 3.0)
+            .groupby("general_genre")["score"]
+            .mean()
+            .sort_values(ascending=False)
+        )
+        top_genres = [str(x) for x in genre_scores[genre_scores > 0].head(3).index.tolist()]
+
+        artist_scores = (
+            group.assign(score=group["rating"] - 3.0)
+            .groupby("singer")["score"]
+            .mean()
+            .sort_values(ascending=False)
+        )
+        top_artists = [str(x) for x in artist_scores[artist_scores > 0].head(3).index.tolist()]
+
+        acoustic_pref = float(
+            np.average(group["acousticness"].to_numpy(dtype=np.float64), weights=positive_weights)
+        )
+        instrumental_pref = float(
+            np.average(group["instrumentalness"].to_numpy(dtype=np.float64), weights=positive_weights)
+        )
+        popularity_tolerance = float(
+            np.clip(
+                np.average(group["popularity"].to_numpy(dtype=np.float64) / 100.0, weights=positive_weights),
+                0.0,
+                1.0,
+            )
+        )
+
+        valence_pref = pref_delta("valence")
+        energy_pref = pref_delta("energy")
+
+        rows.append(
+            {
+                "user_id": int(user_id),
+                "user_valence_pref": valence_pref,
+                "user_energy_pref": energy_pref,
+                "preferred_acousticness": acoustic_pref,
+                "preferred_instrumentalness": instrumental_pref,
+                "popularity_tolerance": popularity_tolerance,
+            }
+        )
+        profiles[str(int(user_id))] = {
+            "user_id": int(user_id),
+            "user_valence_pref": valence_pref,
+            "user_energy_pref": energy_pref,
+            "preferred_acousticness": acoustic_pref,
+            "preferred_instrumentalness": instrumental_pref,
+            "popularity_tolerance": popularity_tolerance,
+            "top_genres": top_genres,
+            "top_artists": top_artists,
+            "mean_stage1_valence": float(group["emo_valence"].mean()),
+            "mean_stage1_arousal": float(group["emo_arousal"].mean()),
+            "stage1_rows": int(len(group)),
+        }
+
+    pref_df = pd.DataFrame(rows).sort_values("user_id").reset_index(drop=True)
+    stage1_enriched = stage1_enriched.merge(pref_df, on="user_id", how="left")
+    return stage1_enriched, pref_df, profiles
+
+
+def attach_hr_baselines(combined: pd.DataFrame) -> pd.DataFrame:
+    shrink = float(PIPELINE_CONFIG["hr_baseline_shrink"])
+    split_stats = (
+        combined.groupby("split")[["hr_mean", "hr_std"]]
+        .mean()
+        .rename(columns={"hr_mean": "split_hr_mean", "hr_std": "split_hr_std"})
+        .reset_index()
+    )
+    user_stats = (
+        combined.groupby(["split", "user_id"])
+        .agg(
+            user_hr_mean_raw=("hr_mean", "mean"),
+            user_hr_std_raw=("hr_std", "mean"),
+            hr_session_count=("inter_id", "count"),
+        )
+        .reset_index()
+        .merge(split_stats, on="split", how="left")
+    )
+    weight = user_stats["hr_session_count"] / (user_stats["hr_session_count"] + shrink)
+    user_stats["user_hr_baseline_mean"] = (
+        weight * user_stats["user_hr_mean_raw"] + (1.0 - weight) * user_stats["split_hr_mean"]
+    )
+    user_stats["user_hr_baseline_std"] = (
+        weight * user_stats["user_hr_std_raw"] + (1.0 - weight) * user_stats["split_hr_std"]
+    )
+
+    merged = combined.merge(
+        user_stats[
+            [
+                "split",
+                "user_id",
+                "hr_session_count",
+                "user_hr_baseline_mean",
+                "user_hr_baseline_std",
+            ]
+        ],
+        on=["split", "user_id"],
+        how="left",
+    )
+    merged["hr_mean_rel_user"] = merged["hr_mean"] - merged["user_hr_baseline_mean"]
+    merged["hr_std_rel_user"] = merged["hr_std"] - merged["user_hr_baseline_std"]
+    return merged
+
+
+def clean_situnes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, dict, dict]:
     df1 = pd.read_csv(SITUNES_DIR / "Stage1" / "interactions.csv")
     df2 = pd.read_csv(SITUNES_DIR / "Stage2" / "interactions.csv")
     df3 = pd.read_csv(SITUNES_DIR / "Stage3" / "interactions.csv")
@@ -173,20 +345,27 @@ def clean_situnes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFr
     with (SITUNES_DIR / "Stage3" / "env.json").open("r", encoding="utf-8") as handle:
         env3 = json.load(handle)
 
-    music = _load_situnes_music()
+    situnes_music = _load_situnes_music()
 
-    stage2_clean, obs2 = _clean_stage("stage2", df2, wrist2, env2, music)
-    stage3_clean, obs3 = _clean_stage("stage3", df3, wrist3, env3, music)
+    stage2_base, obs2 = _clean_stage("stage2", df2, wrist2, env2, situnes_music)
+    stage3_base, obs3 = _clean_stage("stage3", df3, wrist3, env3, situnes_music)
 
     stage1_clean = df1.drop(columns=["duration"], errors="ignore").copy()
     stage1_clean["timestamp"] = stage1_clean["timestamp"].astype("int64")
     stage1_clean["timestamp_local"] = parse_situnes_timestamp(stage1_clean["timestamp"]).astype(str)
+    stage1_enriched, pref_df, profiles = build_user_preferences(stage1_clean, situnes_music)
 
-    combined = pd.concat([stage2_clean, stage3_clean], ignore_index=True)
+    obs_all_raw = np.vstack([obs2, obs3])
+    stage2_base["obs_source_index"] = np.arange(len(stage2_base), dtype=np.int32)
+    stage3_base["obs_source_index"] = np.arange(len(stage3_base), dtype=np.int32) + len(stage2_base)
+
+    combined = pd.concat([stage2_base, stage3_base], ignore_index=True)
+    combined = combined.sort_values(["user_id", "timestamp", "inter_id"]).reset_index(drop=True)
+
     user_counts = combined.groupby("user_id").size().sort_values(ascending=False)
     split_users = balanced_user_split(
         user_counts=user_counts,
-        stage3_users=set(stage3_clean["user_id"].unique()),
+        stage3_users=set(stage3_base["user_id"].unique()),
         seed=int(PIPELINE_CONFIG["split_seed"]),
     )
     user_to_split = {
@@ -195,20 +374,22 @@ def clean_situnes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFr
         for user_id in users
     }
     combined["split"] = combined["user_id"].map(user_to_split)
-    stage2_clean["split"] = stage2_clean["user_id"].map(user_to_split)
-    stage3_clean["split"] = stage3_clean["user_id"].map(user_to_split)
+    combined["session_order_user"] = combined.groupby("user_id").cumcount().astype(int)
 
-    for frame in [stage2_clean, stage3_clean, combined]:
-        frame["session_order_user"] = (
-            frame.sort_values(["user_id", "timestamp", "inter_id"])
-            .groupby("user_id")
-            .cumcount()
-            .astype(int)
-        )
+    combined = combined.merge(pref_df, on="user_id", how="left")
+    combined = attach_hr_baselines(combined)
+    combined["pre_emotion_mask"] = 1.0
+
+    wrist_obs_all = obs_all_raw[combined["obs_source_index"].to_numpy(dtype=np.int32)]
+    combined["obs_idx"] = np.arange(len(combined), dtype=np.int32)
+    combined = combined.drop(columns=["obs_source_index"], errors="ignore")
+
+    stage2_clean = combined[combined["dataset_stage"] == "stage2"].copy().reset_index(drop=True)
+    stage3_clean = combined[combined["dataset_stage"] == "stage3"].copy().reset_index(drop=True)
 
     audit = {
         "situnes": {
-            "stage1_rows": int(len(stage1_clean)),
+            "stage1_rows": int(len(stage1_enriched)),
             "stage2_rows": int(len(stage2_clean)),
             "stage3_rows": int(len(stage3_clean)),
             "combined_rows": int(len(combined)),
@@ -219,15 +400,25 @@ def clean_situnes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFr
             "bucket_distribution": combined["action_bucket"].value_counts().sort_index().to_dict(),
             "time_distribution": combined["time_bucket"].value_counts().sort_index().to_dict(),
             "activity_distribution": combined["activity_majority"].value_counts().sort_index().to_dict(),
+            "hr_mean_summary": {
+                "mean": float(combined["hr_mean"].mean()),
+                "std": float(combined["hr_mean"].std(ddof=0)),
+                "min": float(combined["hr_mean"].min()),
+                "max": float(combined["hr_mean"].max()),
+            },
+            "preference_profile_rows": int(len(pref_df)),
             "raw_hashes": {
+                "stage1_interactions": file_sha256(SITUNES_DIR / "Stage1" / "interactions.csv"),
                 "stage2_interactions": file_sha256(SITUNES_DIR / "Stage2" / "interactions.csv"),
                 "stage3_interactions": file_sha256(SITUNES_DIR / "Stage3" / "interactions.csv"),
+                "stage2_wrist": file_sha256(SITUNES_DIR / "Stage2" / "wrist.npy"),
+                "stage3_wrist": file_sha256(SITUNES_DIR / "Stage3" / "wrist.npy"),
                 "music_info": file_sha256(SITUNES_DIR / "music_metadata" / "music_info.csv"),
             },
         }
     }
 
-    return stage1_clean, stage2_clean, stage3_clean, combined, np.vstack([obs2, obs3]), audit
+    return stage1_enriched, stage2_clean, stage3_clean, combined, wrist_obs_all, audit, profiles
 
 
 def _ridge_fit_predict(
@@ -266,12 +457,41 @@ def _ridge_fit_predict(
         "target": target,
         "alpha": alpha,
         "r2_train": r2,
-        "weights": weights.tolist(),
         "feature_cols": feature_cols,
-        "mean": mean.tolist(),
-        "std": std.tolist(),
     }
     return predicted, metadata
+
+
+def compute_pmemo_eda_impact() -> dict[int, float]:
+    eda_dir = PMEMO_DIR / "EDA"
+    if not eda_dir.exists():
+        return {}
+
+    scores = {}
+    for csv_path in sorted(eda_dir.glob("*_EDA.csv")):
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:
+            continue
+        signal = df.drop(columns=[col for col in df.columns if str(col).lower().startswith("time")], errors="ignore")
+        if signal.empty:
+            continue
+        listener_std = signal.std(axis=0, ddof=0).replace([np.inf, -np.inf], np.nan).dropna()
+        if listener_std.empty:
+            continue
+        try:
+            music_id = int(csv_path.stem.split("_")[0])
+        except ValueError:
+            continue
+        scores[music_id] = float(listener_std.mean())
+
+    if not scores:
+        return {}
+    values = np.asarray(list(scores.values()), dtype=np.float64)
+    lo = float(values.min())
+    hi = float(values.max())
+    denom = max(hi - lo, 1e-8)
+    return {music_id: float((value - lo) / denom) for music_id, value in scores.items()}
 
 
 def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -342,10 +562,15 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         PIPELINE_CONFIG["pmemo_tempo_clip"][0],
         PIPELINE_CONFIG["pmemo_tempo_clip"][1],
     )
-    merged["action_bucket"] = merged.apply(
+    merged["bucket_hint"] = merged.apply(
         lambda row: get_action_bucket(row["valence_01"], row["energy"], row["tempo"]),
         axis=1,
     )
+    merged["action_bucket"] = merged["bucket_hint"].astype(int)
+    merged["bucket_is_soft"] = True
+
+    eda_impact = compute_pmemo_eda_impact()
+    merged["eda_impact"] = merged["musicId"].map(eda_impact).fillna(0.0)
 
     out = merged.rename(columns={"musicId": "song_id"})[
         [
@@ -361,6 +586,9 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
             "energy",
             "tempo",
             "action_bucket",
+            "bucket_hint",
+            "bucket_is_soft",
+            "eda_impact",
         ]
     ].copy()
     out["source"] = "pmemo"
@@ -368,7 +596,8 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     audit = {
         "pmemo": {
             "rows": int(len(out)),
-            "bucket_distribution": out["action_bucket"].value_counts().sort_index().to_dict(),
+            "bucket_distribution": out["bucket_hint"].value_counts().sort_index().to_dict(),
+            "eda_coverage": int((out["eda_impact"] > 0).sum()),
             "transfer_models": {
                 "energy": {
                     "r2_train": round(float(energy_meta["r2_train"]), 4),
@@ -412,6 +641,9 @@ def clean_spotify() -> tuple[pd.DataFrame, dict]:
         lambda row: get_action_bucket(row["valence"], row["energy"], row["tempo"]),
         axis=1,
     )
+    df["bucket_hint"] = df["action_bucket"].astype(int)
+    df["bucket_is_soft"] = False
+
     out = df[
         [
             "track_id",
@@ -431,6 +663,8 @@ def clean_spotify() -> tuple[pd.DataFrame, dict]:
             "valence",
             "tempo",
             "action_bucket",
+            "bucket_hint",
+            "bucket_is_soft",
         ]
     ].copy()
     out["source"] = "spotify"
@@ -486,7 +720,7 @@ def main() -> None:
 
     ensure_dirs()
 
-    stage1_clean, stage2_clean, stage3_clean, combined, wrist_obs_all, situnes_audit = clean_situnes()
+    stage1_clean, stage2_clean, stage3_clean, combined, wrist_obs_all, situnes_audit, user_profiles = clean_situnes()
     split_manifest = write_split_artifacts(combined)
 
     stage1_clean.to_csv(PROCESSED_DIR / "stage1_clean.csv", index=False)
@@ -494,8 +728,8 @@ def main() -> None:
     stage3_clean.to_csv(PROCESSED_DIR / "stage3_clean.csv", index=False)
     combined.to_csv(PROCESSED_DIR / "interactions_clean.csv", index=False)
     np.save(PROCESSED_DIR / "wrist_obs_all.npy", wrist_obs_all)
-    np.save(PROCESSED_DIR / "wrist_stage2_obs.npy", wrist_obs_all[: len(stage2_clean)])
-    np.save(PROCESSED_DIR / "wrist_stage3_obs.npy", wrist_obs_all[len(stage2_clean) :])
+    np.save(PROCESSED_DIR / "wrist_stage2_obs.npy", wrist_obs_all[combined["dataset_stage"].to_numpy() == "stage2"])
+    np.save(PROCESSED_DIR / "wrist_stage3_obs.npy", wrist_obs_all[combined["dataset_stage"].to_numpy() == "stage3"])
 
     situnes_music = _load_situnes_music()
     situnes_music.to_csv(PROCESSED_DIR / "music_situnes_clean.csv", index=False)
@@ -515,6 +749,8 @@ def main() -> None:
         json.dump(split_manifest, handle, indent=2)
     with (PROCESSED_DIR / "dataset_audit.json").open("w", encoding="utf-8") as handle:
         json.dump(audit, handle, indent=2)
+    with (PROCESSED_DIR / "user_preferences.json").open("w", encoding="utf-8") as handle:
+        json.dump(user_profiles, handle, indent=2)
 
     print("Processed datasets written to", PROCESSED_DIR)
     print("  stage1_clean.csv")
@@ -527,6 +763,7 @@ def main() -> None:
         print("  music_pmemo_clean.csv")
     if not args.skip_spotify:
         print("  music_spotify_clean.csv")
+    print("  user_preferences.json")
     print("  split_manifest.json")
     print("  dataset_audit.json")
 

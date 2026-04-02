@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pandas as pd; df = pd.read_csv\\(''data/processed/interactions_clean.csv''\\); print\\(f''interactions shape: {df.shape}''\\); print\\(f''columns: {list\\(df.columns\\)}''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python -m json.tool)",
+      "Bash(python src/hmm/hmm_train.py)"
+    ]
+  }
+}

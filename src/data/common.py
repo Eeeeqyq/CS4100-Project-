@@ -24,8 +24,8 @@ PMEMO_DIR = RAW_DIR / "pmemo"
 SPOTIFY_DIR = RAW_DIR / "spotify_kaggle"
 
 N_HMM_STATES = 3
-N_WRIST_OBS = 20
-STATE_DIM = 5
+N_WRIST_OBS = 60
+STATE_DIM = 14
 ACTION_DIM = 8
 
 DEFAULT_SEED = 42
@@ -34,6 +34,11 @@ VAL_USERS = 5
 TEST_USERS = 5
 
 REWARD_THRESHOLD = 0.10
+EMOTION_ALPHA = 0.7
+EMOTION_BETA = 0.3
+DEFAULT_ACCEPTANCE_WEIGHT = 0.3
+DEFAULT_EMOTION_WEIGHT = 0.7
+HR_BUCKET_THRESHOLDS = (-8.0, 12.0)
 
 ACTIVITY_REMAP = {
     0: 0,  # still
@@ -91,12 +96,22 @@ def intensity_bucket(intensity: float) -> int:
     return 3
 
 
+def hr_bucket(hr_value: float, low: float = HR_BUCKET_THRESHOLDS[0], high: float = HR_BUCKET_THRESHOLDS[1]) -> int:
+    if hr_value < low:
+        return 0
+    if hr_value <= high:
+        return 1
+    return 2
+
+
 def encode_wrist_timestep(wrist_ts: Iterable[float]) -> int:
     wrist_ts = list(wrist_ts)
+    hr = float(wrist_ts[0])
     activity_raw = int(wrist_ts[3])
     activity = ACTIVITY_REMAP.get(activity_raw, 0)
     ib = intensity_bucket(float(wrist_ts[1]))
-    return int(ib * 5 + activity)
+    hb = hr_bucket(hr)
+    return int(hb * 20 + ib * 5 + activity)
 
 
 def encode_wrist_session(wrist_session: np.ndarray) -> np.ndarray:
@@ -115,6 +130,7 @@ def majority_vote(values: Iterable[int], tie_break: int) -> int:
 
 
 def summarize_wrist_session(wrist_session: np.ndarray) -> dict:
+    heart_rate = wrist_session[:, 0].astype(float)
     intensities = wrist_session[:, 1].astype(float)
     activities_raw = wrist_session[:, 3].astype(int)
     activities = np.vectorize(lambda x: ACTIVITY_REMAP.get(int(x), 0))(activities_raw)
@@ -127,6 +143,11 @@ def summarize_wrist_session(wrist_session: np.ndarray) -> dict:
 
     intensity_mean = float(np.mean(intensities))
     intensity_last = float(intensities[-1])
+    hr_mean = float(np.mean(heart_rate))
+    hr_std = float(np.std(heart_rate, ddof=0))
+    hr_min = float(np.min(heart_rate))
+    hr_max = float(np.max(heart_rate))
+    hr_last = float(heart_rate[-1])
 
     return {
         "wrist_obs": encoded,
@@ -138,7 +159,26 @@ def summarize_wrist_session(wrist_session: np.ndarray) -> dict:
         "intensity_mean": intensity_mean,
         "intensity_bucket_last": intensity_bucket(intensity_last),
         "intensity_bucket_mean": intensity_bucket(intensity_mean),
+        "hr_mean": hr_mean,
+        "hr_std": hr_std,
+        "hr_min": hr_min,
+        "hr_max": hr_max,
+        "hr_last": hr_last,
+        "hr_bucket_mean": hr_bucket(hr_mean),
+        "hr_bucket_last": hr_bucket(hr_last),
     }
+
+
+def emotion_score(
+    pre_valence: float,
+    pre_arousal: float,
+    post_valence: float,
+    post_arousal: float,
+) -> float:
+    return float(
+        (post_valence - pre_valence) * EMOTION_ALPHA
+        + (post_arousal - pre_arousal) * EMOTION_BETA
+    )
 
 
 def reward_from_emotions(
@@ -148,12 +188,33 @@ def reward_from_emotions(
     post_arousal: float,
     threshold: float = REWARD_THRESHOLD,
 ) -> tuple[int, float]:
-    score = (post_valence - pre_valence) * 0.7 + (post_arousal - pre_arousal) * 0.3
+    score = emotion_score(pre_valence, pre_arousal, post_valence, post_arousal)
     if score > threshold:
         return 1, float(score)
     if score < -threshold:
         return -1, float(score)
     return 0, float(score)
+
+
+def emotional_benefit(score: float) -> float:
+    return float(np.clip(score, -1.0, 1.0))
+
+
+def acceptance_score(preference: float | None = None, rating: float | None = None) -> float:
+    if preference is not None and pd.notna(preference):
+        return float(np.clip((float(preference) - 50.0) / 50.0, -1.0, 1.0))
+    if rating is not None and pd.notna(rating):
+        return float(np.clip((float(rating) - 3.0) / 2.0, -1.0, 1.0))
+    return 0.0
+
+
+def combine_outcomes(
+    emotion_value: float,
+    acceptance_value: float,
+    alpha: float = DEFAULT_EMOTION_WEIGHT,
+    beta: float = DEFAULT_ACCEPTANCE_WEIGHT,
+) -> float:
+    return float(np.clip(alpha * emotion_value + beta * acceptance_value, -1.0, 1.0))
 
 
 def get_action_bucket(valence: float, energy: float, tempo: float) -> int:
@@ -218,18 +279,55 @@ def file_sha256(path: Path, chunk_size: int = 1_048_576) -> str:
     return digest.hexdigest()
 
 
+def _clip01(value: float) -> float:
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def _normalize_emotion(value: float | None) -> float:
+    if value is None or pd.isna(value):
+        return 0.5
+    return _clip01((float(value) + 1.0) / 2.0)
+
+
+def _normalize_preference(value: float | None) -> float:
+    if value is None or pd.isna(value):
+        return 0.5
+    return _clip01((float(np.clip(value, -1.0, 1.0)) + 1.0) / 2.0)
+
+
 def state_vector_from_components(
     belief: np.ndarray,
     time_bucket: int,
     activity_remapped: int,
+    weather_bucket: int = 1,
+    gps_speed: float = 0.0,
+    hr_mean_rel_user: float = 0.0,
+    hr_std: float = 0.0,
+    pre_valence: float | None = None,
+    pre_arousal: float | None = None,
+    pre_emotion_mask: float | None = None,
+    user_valence_pref: float = 0.0,
+    user_energy_pref: float = 0.0,
 ) -> np.ndarray:
+    if pre_emotion_mask is None:
+        pre_emotion_mask = 1.0 if (pre_valence is not None and pre_arousal is not None) else 0.0
+
     return np.asarray(
         [
             float(belief[0]),
             float(belief[1]),
             float(belief[2]),
-            float(time_bucket) / 2.0,
-            float(activity_remapped) / 4.0,
+            _clip01(float(time_bucket) / 2.0),
+            _clip01(float(activity_remapped) / 4.0),
+            _clip01(float(weather_bucket) / 2.0),
+            _clip01(float(gps_speed) / 10.0),
+            _clip01((float(hr_mean_rel_user) + 20.0) / 40.0),
+            _clip01(float(hr_std) / 25.0),
+            _normalize_emotion(pre_valence),
+            _normalize_emotion(pre_arousal),
+            _clip01(float(pre_emotion_mask)),
+            _normalize_preference(user_valence_pref),
+            _normalize_preference(user_energy_pref),
         ],
         dtype=np.float32,
     )
@@ -261,6 +359,7 @@ def track_quality_features(df: pd.DataFrame) -> pd.DataFrame:
         ("energy", 0.5),
         ("valence", 0.5),
         ("tempo", 120.0),
+        ("eda_impact", 0.0),
     ]:
         if column not in out.columns:
             out[column] = default
@@ -271,4 +370,10 @@ def track_quality_features(df: pd.DataFrame) -> pd.DataFrame:
     if "genre" not in out.columns:
         out["genre"] = ""
     out["genre"] = out["genre"].fillna("").astype(str)
+    if "bucket_is_soft" not in out.columns:
+        out["bucket_is_soft"] = False
+    out["bucket_is_soft"] = out["bucket_is_soft"].fillna(False).astype(bool)
+    if "bucket_hint" not in out.columns:
+        out["bucket_hint"] = out.get("action_bucket", -1)
+    out["bucket_hint"] = out["bucket_hint"].fillna(-1).astype(int)
     return out

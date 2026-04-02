@@ -23,7 +23,6 @@ ENV/
 .python-version
 AGENTS.md
 CLAUDE.md
-/docs
 
 # Editors and OS noise
 .DS_Store

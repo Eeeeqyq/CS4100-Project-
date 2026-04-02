@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.data.common import ACTIVITY_REMAP, encode_wrist_session, intensity_bucket
+from src.data.common import ACTIVITY_REMAP, encode_wrist_session, hr_bucket, intensity_bucket
 
 
 _ACTIVITY_PRIOR = np.asarray(
@@ -24,10 +24,11 @@ _ACTIVITY_PRIOR = np.asarray(
 def encode_obs_seq(
     intensity: float,
     activity_type: int,
+    hr_mean: float = 0.0,
     length: int = 30,
 ) -> np.ndarray:
     activity = ACTIVITY_REMAP.get(int(activity_type), 0)
-    obs = int(intensity_bucket(float(intensity)) * 5 + activity)
+    obs = int(hr_bucket(float(hr_mean)) * 20 + intensity_bucket(float(intensity)) * 5 + activity)
     return np.full(length, obs, dtype=np.int32)
 
 
@@ -66,9 +67,10 @@ def corrected_belief(
 def physical_target_state(
     activity_remapped: int,
     intensity_bucket_value: int,
+    hr_bucket_value: int = 1,
 ) -> int:
     if activity_remapped == 4 or intensity_bucket_value >= 3:
         return 2
-    if activity_remapped in {1, 2} or intensity_bucket_value >= 2:
+    if activity_remapped in {1, 2} or intensity_bucket_value >= 2 or hr_bucket_value == 2:
         return 1
     return 0

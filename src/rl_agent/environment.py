@@ -7,10 +7,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.data.common import ACTION_DIM, STATE_DIM
+
 
 class MusicEnv:
-    STATE_DIM = 5
-    ACTION_DIM = 8
+    STATE_DIM = STATE_DIM
+    ACTION_DIM = ACTION_DIM
 
     def __init__(
         self,
@@ -48,31 +50,44 @@ class MusicEnv:
         assert 0 <= int(action) < self.ACTION_DIM, f"action must be in [0, {self.ACTION_DIM - 1}]"
 
         row = self.df.iloc[int(self._row_idx)]
-        expected_reward = self.reward_model.expected_reward(
+        components = self.reward_model.expected_components(
             int(row["hmm_state"]),
             int(row["time_bucket"]),
             int(row["activity_majority"]),
             int(action),
+            pre_valence=float(row.get("emo_pre_valence", 0.0)),
+            pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
+            user_valence_pref=float(row.get("user_valence_pref", 0.0)),
+            user_energy_pref=float(row.get("user_energy_pref", 0.0)),
         )
         if self.reward_mode == "sample":
-            reward = self.reward_model.sample_reward(
-                int(row["hmm_state"]),
-                int(row["time_bucket"]),
-                int(row["activity_majority"]),
-                int(action),
+            reward = float(
+                self.reward_model.sample_reward(
+                    int(row["hmm_state"]),
+                    int(row["time_bucket"]),
+                    int(row["activity_majority"]),
+                    int(action),
+                    pre_valence=float(row.get("emo_pre_valence", 0.0)),
+                    pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
+                )
             )
         else:
-            reward = expected_reward
+            reward = float(components["combined_reward"])
         self._done = True
 
         info = {
             "historical_action": int(row.get("action_bucket", -1)),
-            "expected_reward": expected_reward,
+            "expected_reward": float(components["combined_reward"]),
+            "emotion_benefit": float(components["emotion_benefit"]),
+            "acceptance": float(components["acceptance"]),
+            "support": float(components["support"]),
             "positive_prob": self.reward_model.positive_prob(
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
                 int(action),
+                pre_valence=float(row.get("emo_pre_valence", 0.0)),
+                pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
             ),
             "user_id": int(row.get("user_id", -1)),
             "is_synthetic": bool(row.get("is_synthetic", False)),

@@ -1,5 +1,5 @@
 """
-Precompute corrected HMM beliefs and 5D state vectors for all splits.
+Precompute corrected HMM beliefs and 14D state vectors for all splits.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data.common import PROCESSED_DIR, state_vector_from_components
+from src.data.common import PROCESSED_DIR, STATE_DIM, state_vector_from_components
 from src.hmm.hmm_inference import corrected_belief
 from src.hmm.hmm_model import HMM
 
@@ -27,7 +27,7 @@ def main() -> None:
     hmm = HMM.load("models/hmm.npz")
 
     beliefs = np.zeros((len(df), hmm.n_states), dtype=np.float32)
-    state_vectors = np.zeros((len(df), 5), dtype=np.float32)
+    state_vectors = np.zeros((len(df), STATE_DIM), dtype=np.float32)
 
     for idx, row in df.iterrows():
         belief = corrected_belief(hmm, wrist_obs[idx], int(row["activity_majority"]))
@@ -36,6 +36,15 @@ def main() -> None:
             belief,
             int(row["time_bucket"]),
             int(row["activity_majority"]),
+            weather_bucket=int(row.get("weather_bucket", 1)),
+            gps_speed=float(row.get("gps_speed", 0.0)),
+            hr_mean_rel_user=float(row.get("hr_mean_rel_user", 0.0)),
+            hr_std=float(row.get("hr_std", 0.0)),
+            pre_valence=float(row["emo_pre_valence"]) if pd.notna(row.get("emo_pre_valence")) else None,
+            pre_arousal=float(row["emo_pre_arousal"]) if pd.notna(row.get("emo_pre_arousal")) else None,
+            pre_emotion_mask=float(row.get("pre_emotion_mask", 1.0)),
+            user_valence_pref=float(row.get("user_valence_pref", 0.0)),
+            user_energy_pref=float(row.get("user_energy_pref", 0.0)),
         )
 
     np.save(PROCESSED_DIR / "belief_states.npy", beliefs)

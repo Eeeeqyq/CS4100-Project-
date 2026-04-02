@@ -6,11 +6,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 
 from src.data.common import MODELS_DIR, PROCESSED_DIR
 from src.rl_agent.dqn_agent import DQNAgent
@@ -28,7 +26,7 @@ EPS_MIN = 0.05
 BATCH_SIZE = 128
 BUFFER_CAP = 20_000
 TARGET_SYNC = 20
-HIDDEN = 64
+HIDDEN = 128
 EVAL_EVERY = 150
 SEED = 42
 
@@ -58,13 +56,19 @@ def load_synthetic() -> tuple[pd.DataFrame | None, np.ndarray | None]:
     return df, states
 
 
-def build_or_load_reward_model(train_df: pd.DataFrame) -> HierarchicalRewardModel:
-    path = MODELS_DIR / "reward_model.json"
-    if path.exists():
-        return HierarchicalRewardModel.load(path)
-    model = HierarchicalRewardModel(seed=SEED).fit(train_df)
-    model.save(path)
+def build_reward_model(train_df: pd.DataFrame, alpha: float, beta: float) -> HierarchicalRewardModel:
+    model = HierarchicalRewardModel(seed=SEED, alpha=alpha, beta=beta).fit(train_df)
+    model.save(MODELS_DIR / "reward_model.json")
     return model
+
+
+def build_real_sample_weights(train_df: pd.DataFrame) -> np.ndarray:
+    action_counts = train_df["action_bucket"].value_counts().to_dict()
+    weights = np.asarray(
+        [1.0 / np.sqrt(max(action_counts.get(int(bucket), 1), 1)) for bucket in train_df["action_bucket"]],
+        dtype=np.float64,
+    )
+    return weights / weights.mean()
 
 
 def evaluate_policy(
@@ -72,47 +76,67 @@ def evaluate_policy(
     df: pd.DataFrame,
     reward_model: HierarchicalRewardModel,
 ) -> dict:
-    expected_rewards = []
+    combined_rewards = []
+    emotion_rewards = []
+    acceptance_rewards = []
     positive_probs = []
     oracle_rewards = []
     historical_match = []
+    supports = []
+
     for action, (_, row) in zip(actions, df.iterrows()):
-        context_rewards = [
-            reward_model.expected_reward(
+        per_action = [
+            reward_model.expected_components(
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
                 bucket,
+                pre_valence=float(row.get("emo_pre_valence", 0.0)),
+                pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
+                user_valence_pref=float(row.get("user_valence_pref", 0.0)),
+                user_energy_pref=float(row.get("user_energy_pref", 0.0)),
             )
             for bucket in range(8)
         ]
-        expected_rewards.append(context_rewards[int(action)])
+        chosen = per_action[int(action)]
+        combined_rewards.append(chosen["combined_reward"])
+        emotion_rewards.append(chosen["emotion_benefit"])
+        acceptance_rewards.append(chosen["acceptance"])
         positive_probs.append(
             reward_model.positive_prob(
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
                 int(action),
+                pre_valence=float(row.get("emo_pre_valence", 0.0)),
+                pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
             )
         )
-        oracle_rewards.append(max(context_rewards))
+        oracle_rewards.append(max(item["combined_reward"] for item in per_action))
         historical_match.append(int(action) == int(row.get("action_bucket", -1)))
+        supports.append(chosen["support"])
 
-    expected_rewards = np.asarray(expected_rewards, dtype=np.float64)
+    combined_rewards = np.asarray(combined_rewards, dtype=np.float64)
+    emotion_rewards = np.asarray(emotion_rewards, dtype=np.float64)
+    acceptance_rewards = np.asarray(acceptance_rewards, dtype=np.float64)
     positive_probs = np.asarray(positive_probs, dtype=np.float64)
     oracle_rewards = np.asarray(oracle_rewards, dtype=np.float64)
     historical_match = np.asarray(historical_match, dtype=np.float64)
+    supports = np.asarray(supports, dtype=np.float64)
 
     action_counts = np.bincount(actions, minlength=8).astype(np.float64)
     action_probs = action_counts / max(action_counts.sum(), 1.0)
     action_entropy = float(-np.sum(action_probs * np.log(action_probs + 1e-12)))
 
     return {
-        "mean_expected_reward": float(expected_rewards.mean()),
+        "mean_expected_reward": float(combined_rewards.mean()),
+        "mean_emotion_benefit": float(emotion_rewards.mean()),
+        "mean_acceptance": float(acceptance_rewards.mean()),
         "mean_positive_prob": float(positive_probs.mean()),
-        "mean_regret": float((oracle_rewards - expected_rewards).mean()),
+        "mean_regret": float((oracle_rewards - combined_rewards).mean()),
         "historical_match_rate": float(historical_match.mean()),
         "action_entropy": action_entropy,
+        "mean_support": float(supports.mean()),
         "action_counts": {str(i): int(c) for i, c in enumerate(action_counts.astype(int))},
     }
 
@@ -121,7 +145,11 @@ def policy_actions(agent: DQNAgent, states: np.ndarray) -> np.ndarray:
     return np.asarray([agent.greedy_action(state) for state in states], dtype=np.int32)
 
 
-def baseline_actions_state_prior(train_df: pd.DataFrame, reward_model: HierarchicalRewardModel, df: pd.DataFrame) -> np.ndarray:
+def baseline_actions_state_prior(
+    train_df: pd.DataFrame,
+    reward_model: HierarchicalRewardModel,
+    df: pd.DataFrame,
+) -> np.ndarray:
     state_best = {}
     for hmm_state in range(3):
         scores = []
@@ -139,18 +167,22 @@ def baseline_actions_state_prior(train_df: pd.DataFrame, reward_model: Hierarchi
 def train(args: argparse.Namespace) -> None:
     MODELS_DIR.mkdir(exist_ok=True)
     real_df, real_states = load_real_data()
-    train_df = real_df[real_df["split"] == "train"].reset_index(drop=True)
-    val_df = real_df[real_df["split"] == "val"].reset_index(drop=True)
-    test_df = real_df[real_df["split"] == "test"].reset_index(drop=True)
-    train_states = real_states[real_df["split"].to_numpy() == "train"]
-    val_states = real_states[real_df["split"].to_numpy() == "val"]
-    test_states = real_states[real_df["split"].to_numpy() == "test"]
+    train_mask = real_df["split"].to_numpy() == "train"
+    val_mask = real_df["split"].to_numpy() == "val"
+    test_mask = real_df["split"].to_numpy() == "test"
 
-    reward_model = build_or_load_reward_model(train_df)
+    train_df = real_df[train_mask].reset_index(drop=True)
+    val_df = real_df[val_mask].reset_index(drop=True)
+    test_df = real_df[test_mask].reset_index(drop=True)
+    train_states = real_states[train_mask]
+    val_states = real_states[val_mask]
+    test_states = real_states[test_mask]
+
+    reward_model = build_reward_model(train_df, alpha=args.alpha, beta=args.beta)
 
     env_df = train_df.copy()
     env_states = train_states.copy()
-    sample_weights = np.ones(len(env_df), dtype=np.float64)
+    sample_weights = build_real_sample_weights(train_df)
 
     if args.synthetic_weight > 0:
         synthetic_df, synthetic_states = load_synthetic()
@@ -159,15 +191,23 @@ def train(args: argparse.Namespace) -> None:
             env_states = np.vstack([env_states, synthetic_states])
             sample_weights = np.concatenate(
                 [
-                    np.ones(len(train_df), dtype=np.float64),
+                    sample_weights,
                     np.full(len(synthetic_df), float(args.synthetic_weight), dtype=np.float64),
                 ]
             )
 
-    env = MusicEnv(env_df, env_states, reward_model=reward_model, sample_weights=sample_weights, seed=SEED)
+    env = MusicEnv(
+        env_df,
+        env_states,
+        reward_model=reward_model,
+        sample_weights=sample_weights,
+        reward_mode=args.reward_mode,
+        seed=SEED,
+    )
     print(env)
     print(f"  real_train={len(train_df)}  val={len(val_df)}  test={len(test_df)}")
     print(f"  synthetic_weight={args.synthetic_weight:.2f}  total_env_contexts={len(env_df)}")
+    print(f"  reward_weights: alpha={args.alpha:.2f} beta={args.beta:.2f}  mode={args.reward_mode}")
 
     agent = DQNAgent(
         state_dim=MusicEnv.STATE_DIM,
@@ -224,15 +264,19 @@ def train(args: argparse.Namespace) -> None:
                 "loss": float(loss or 0.0),
                 "epsilon": float(agent.epsilon),
                 "val_expected_reward": val_metrics["mean_expected_reward"],
+                "val_emotion_benefit": val_metrics["mean_emotion_benefit"],
+                "val_acceptance": val_metrics["mean_acceptance"],
                 "val_positive_prob": val_metrics["mean_positive_prob"],
                 "val_regret": val_metrics["mean_regret"],
                 "val_action_entropy": val_metrics["action_entropy"],
+                "val_mean_support": val_metrics["mean_support"],
                 "preview_expected_reward": preview_metrics["mean_expected_reward"],
             }
             log_rows.append(row)
             print(
-                f"  ep={episode:4d}  val_exp={val_metrics['mean_expected_reward']:+.4f}  "
-                f"val_regret={val_metrics['mean_regret']:.4f}  "
+                f"  ep={episode:4d}  val_combined={val_metrics['mean_expected_reward']:+.4f}  "
+                f"emotion={val_metrics['mean_emotion_benefit']:+.4f}  "
+                f"accept={val_metrics['mean_acceptance']:+.4f}  "
                 f"entropy={val_metrics['action_entropy']:.3f}  eps={agent.epsilon:.3f}"
             )
 
@@ -267,6 +311,10 @@ def train(args: argparse.Namespace) -> None:
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
                 action,
+                pre_valence=float(row.get("emo_pre_valence", 0.0)),
+                pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
+                user_valence_pref=float(row.get("user_valence_pref", 0.0)),
+                user_energy_pref=float(row.get("user_energy_pref", 0.0)),
             )
             for action in range(8)
         ]
@@ -289,7 +337,11 @@ def train(args: argparse.Namespace) -> None:
             "target_sync": TARGET_SYNC,
             "hidden": HIDDEN,
             "synthetic_weight": args.synthetic_weight,
+            "reward_mode": args.reward_mode,
+            "alpha": args.alpha,
+            "beta": args.beta,
         },
+        "reward_model": reward_model.metadata,
         "best_val_expected_reward": best_val,
         "test_metrics": test_metrics,
         "baselines": {
@@ -303,14 +355,17 @@ def train(args: argparse.Namespace) -> None:
     (MODELS_DIR / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print("\nTest-set policy summary:")
-    print(f"  DQN mean expected reward:      {test_metrics['mean_expected_reward']:+.4f}")
+    print(f"  DQN mean combined reward:      {test_metrics['mean_expected_reward']:+.4f}")
+    print(f"  DQN mean emotion benefit:      {test_metrics['mean_emotion_benefit']:+.4f}")
+    print(f"  DQN mean acceptance:           {test_metrics['mean_acceptance']:+.4f}")
     print(f"  DQN mean regret:               {test_metrics['mean_regret']:.4f}")
     print(f"  DQN action entropy:            {test_metrics['action_entropy']:.3f}")
-    print(f"  Always-7 expected reward:      {always7_metrics['mean_expected_reward']:+.4f}")
-    print(f"  State-prior expected reward:   {state_prior_metrics['mean_expected_reward']:+.4f}")
+    print(f"  Always-7 combined reward:      {always7_metrics['mean_expected_reward']:+.4f}")
+    print(f"  State-prior combined reward:   {state_prior_metrics['mean_expected_reward']:+.4f}")
     print(f"  Random uniform exp. reward:    {random_metrics['mean_expected_reward']:+.4f}")
     print("\nSaved:")
     print("  models/agent.pt")
+    print("  models/reward_model.json")
     print("  models/training_log.csv")
     print("  models/training_summary.json")
 
@@ -320,9 +375,17 @@ def main() -> None:
     parser.add_argument(
         "--synthetic-weight",
         type=float,
-        default=0.35,
+        default=0.25,
         help="Sampling weight applied to synthetic contexts relative to real contexts.",
     )
+    parser.add_argument(
+        "--reward-mode",
+        choices=["expected", "sample"],
+        default="expected",
+        help="Reward mode exposed by the offline environment.",
+    )
+    parser.add_argument("--alpha", type=float, default=0.70, help="Weight for emotional benefit.")
+    parser.add_argument("--beta", type=float, default=0.30, help="Weight for acceptance.")
     args = parser.parse_args()
     train(args)
 

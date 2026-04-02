@@ -13,12 +13,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data.common import (
-    MODELS_DIR,
-    PROCESSED_DIR,
-    STATE_NAMES,
-    state_vector_from_components,
-)
+from src.data.common import MODELS_DIR, PROCESSED_DIR, state_vector_from_components
 from src.hmm.hmm_inference import corrected_belief
 from src.hmm.hmm_model import HMM
 from src.rl_agent.reward_model import HierarchicalRewardModel
@@ -26,7 +21,7 @@ from src.rl_agent.reward_model import HierarchicalRewardModel
 
 SEED = 99
 SYNTHETIC_ROWS = 900
-REBALANCE_TEMPERATURE = 0.88
+REBALANCE_TEMPERATURE = 0.78
 TIME_SMOOTH = 0.15
 
 
@@ -102,8 +97,8 @@ def make_synthetic_rows(
         for state, group in train_df.groupby("hmm_state")
     }
     action_counts = train_df["action_bucket"].value_counts().sort_index()
-    global_action_probs = action_counts.to_numpy(dtype=np.float64)
-    global_action_probs /= global_action_probs.sum()
+    action_probs = action_counts.to_numpy(dtype=np.float64)
+    action_probs /= action_probs.sum()
 
     while total_rows < SYNTHETIC_ROWS:
         n_sessions = int(rng.choice(session_counts))
@@ -120,13 +115,43 @@ def make_synthetic_rows(
 
             belief = corrected_belief(hmm, obs_seq, activity)
             hmm_state = int(belief.argmax())
-            state_vector = state_vector_from_components(belief, current_time, activity)
+            state_vector = state_vector_from_components(
+                belief,
+                current_time,
+                activity,
+                weather_bucket=int(template.get("weather_bucket", 1)),
+                gps_speed=float(template.get("gps_speed", 0.0)),
+                hr_mean_rel_user=float(template.get("hr_mean_rel_user", 0.0)),
+                hr_std=float(template.get("hr_std", 0.0)),
+                pre_valence=float(template.get("emo_pre_valence", 0.0)),
+                pre_arousal=float(template.get("emo_pre_arousal", 0.0)),
+                pre_emotion_mask=0.0,
+                user_valence_pref=float(template.get("user_valence_pref", 0.0)),
+                user_energy_pref=float(template.get("user_energy_pref", 0.0)),
+            )
 
-            action = int(rng.choice(8, p=global_action_probs))
-            reward = reward_model.sample_reward(hmm_state, current_time, activity, action)
+            action = int(rng.choice(8, p=action_probs))
 
             source_for_mood = real_by_state.get(hmm_state, train_df)
             mood_seed = source_for_mood.sample(1, random_state=int(rng.integers(0, 1_000_000))).iloc[0]
+            reward = reward_model.sample_reward(
+                hmm_state,
+                current_time,
+                activity,
+                action,
+                pre_valence=float(mood_seed["emo_pre_valence"]),
+                pre_arousal=float(mood_seed["emo_pre_arousal"]),
+            )
+            components = reward_model.expected_components(
+                hmm_state,
+                current_time,
+                activity,
+                action,
+                pre_valence=float(mood_seed["emo_pre_valence"]),
+                pre_arousal=float(mood_seed["emo_pre_arousal"]),
+                user_valence_pref=float(template.get("user_valence_pref", 0.0)),
+                user_energy_pref=float(template.get("user_energy_pref", 0.0)),
+            )
             dv, da = reward_model.sample_mood_delta(reward)
             pre_valence = float(mood_seed["emo_pre_valence"])
             pre_arousal = float(mood_seed["emo_pre_arousal"])
@@ -151,6 +176,9 @@ def make_synthetic_rows(
                     "emo_post_arousal": round(post_arousal, 6),
                     "reward": reward,
                     "reward_score": float((post_valence - pre_valence) * 0.7 + (post_arousal - pre_arousal) * 0.3),
+                    "emotion_benefit": float(components["emotion_benefit"]),
+                    "acceptance_score": float(components["acceptance"]),
+                    "combined_reward": float(components["combined_reward"]),
                     "action_bucket": action,
                     "time_bucket": current_time,
                     "time_label": {0: "morning", 1: "afternoon", 2: "evening"}[current_time],
@@ -162,8 +190,17 @@ def make_synthetic_rows(
                     "intensity_last": float(template["intensity_last"]),
                     "intensity_bucket_mean": int(template["intensity_bucket_mean"]),
                     "intensity_bucket_last": int(template["intensity_bucket_last"]),
-                    "weather_bucket": int(template["weather_bucket"]),
-                    "gps_speed": float(template["gps_speed"]),
+                    "hr_mean": float(template.get("hr_mean", 0.0)),
+                    "hr_std": float(template.get("hr_std", 0.0)),
+                    "hr_min": float(template.get("hr_min", 0.0)),
+                    "hr_max": float(template.get("hr_max", 0.0)),
+                    "hr_last": float(template.get("hr_last", 0.0)),
+                    "user_hr_baseline_mean": float(template.get("user_hr_baseline_mean", 0.0)),
+                    "user_hr_baseline_std": float(template.get("user_hr_baseline_std", 0.0)),
+                    "hr_mean_rel_user": float(template.get("hr_mean_rel_user", 0.0)),
+                    "hr_std_rel_user": float(template.get("hr_std_rel_user", 0.0)),
+                    "weather_bucket": int(template.get("weather_bucket", 1)),
+                    "gps_speed": float(template.get("gps_speed", 0.0)),
                     "dataset_stage": "synthetic",
                     "split": "synthetic",
                     "session_order_user": session_idx,
@@ -171,6 +208,9 @@ def make_synthetic_rows(
                     "belief_0": float(belief[0]),
                     "belief_1": float(belief[1]),
                     "belief_2": float(belief[2]),
+                    "pre_emotion_mask": 0.0,
+                    "user_valence_pref": float(template.get("user_valence_pref", 0.0)),
+                    "user_energy_pref": float(template.get("user_energy_pref", 0.0)),
                     "is_synthetic": True,
                     "source_template_idx": template_idx,
                 }
@@ -185,7 +225,8 @@ def make_synthetic_rows(
     synthetic_df = pd.DataFrame(rows)
     state_vectors = np.asarray(state_vectors, dtype=np.float32)
 
-    real_entropy = -np.sum(train_df[["belief_0", "belief_1", "belief_2"]].to_numpy() * np.log(train_df[["belief_0", "belief_1", "belief_2"]].to_numpy() + 1e-12), axis=1)
+    real_beliefs = train_df[["belief_0", "belief_1", "belief_2"]].to_numpy(dtype=np.float32)
+    real_entropy = -np.sum(real_beliefs * np.log(real_beliefs + 1e-12), axis=1)
     synth_entropy = -np.sum(state_vectors[:, :3] * np.log(state_vectors[:, :3] + 1e-12), axis=1)
 
     report = {
@@ -216,8 +257,9 @@ def main() -> None:
     df["belief_2"] = states[:, 2]
     df["is_synthetic"] = False
 
-    train_df = df[df["split"] == "train"].reset_index(drop=True)
-    train_wrist = wrist_obs[df["split"].to_numpy() == "train"]
+    train_mask = df["split"].to_numpy() == "train"
+    train_df = df[train_mask].reset_index(drop=True)
+    train_wrist = wrist_obs[train_mask]
 
     reward_model = build_reward_model(train_df)
     hmm = HMM.load(MODELS_DIR / "hmm.npz")

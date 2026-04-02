@@ -2,12 +2,14 @@
 NumPy-only Hidden Markov Model for 3 latent physical-context states.
 
 The canonical HMM in this project is trained on wrist-only observations:
-    obs = intensity_bucket * 5 + activity_remapped
-where obs is an integer in [0, 19].
+    obs = hr_bucket * 20 + intensity_bucket * 5 + activity_remapped
+where obs is an integer in [0, 59].
 """
 
 import json
 import numpy as np
+
+from src.data.common import N_WRIST_OBS
 
 
 class HMM:
@@ -18,7 +20,7 @@ class HMM:
         "high-energy",   # high intensity, running
     ]
 
-    def __init__(self, n_states=3, n_obs=20, seed=42, metadata=None):
+    def __init__(self, n_states=3, n_obs=N_WRIST_OBS, seed=42, metadata=None):
         self.n_states = n_states
         self.n_obs    = n_obs
         self.rng      = np.random.default_rng(seed)
@@ -145,7 +147,7 @@ class HMM:
 
         Parameters
         ----------
-        sequences : list of array-like  (each is a sequence of ints 0-179)
+        sequences : list of array-like  (each is a sequence of ints 0-59)
         n_iter    : max EM iterations
         tol       : stop early if |delta log-likelihood| < tol
         verbose   : print log-likelihood each iteration

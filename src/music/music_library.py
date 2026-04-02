@@ -1,32 +1,35 @@
 """
-Deterministic, context-aware music retrieval on top of the cleaned catalogs.
+Deterministic, preference-aware music retrieval on top of the cleaned catalogs.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from src.data.common import BUCKET_LABELS, bucket_targets, track_quality_features
+from src.data.common import BUCKET_LABELS, PROCESSED_DIR, bucket_targets, track_quality_features
 
 
 MODE_GENRE_BOOSTS = {
-    "focus": ["ambient", "classical", "study", "piano", "acoustic", "chill", "indie"],
-    "wind_down": ["ambient", "acoustic", "singer-songwriter", "folk", "classical", "lofi"],
+    "focus": ["ambient", "classical", "study", "piano", "acoustic", "chill", "indie", "lofi"],
+    "wind_down": ["ambient", "acoustic", "singer-songwriter", "folk", "classical", "lofi", "jazz"],
     "exercise": ["dance", "edm", "electro", "house", "hip-hop", "rock", "pop", "workout"],
+    "exercise-lite": ["dance", "indie", "rock", "pop", "electro"],
     "uplift": ["soul", "funk", "disco", "indie", "pop"],
 }
 
 
 class MusicLibrary:
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, user_profiles: dict[str, dict] | None = None):
         self.df = track_quality_features(df.reset_index(drop=True))
-        self.df["bucket_label"] = self.df["action_bucket"].map(BUCKET_LABELS)
+        self.df["bucket_label"] = self.df["action_bucket"].map(BUCKET_LABELS).fillna("soft-match")
+        self.user_profiles = user_profiles or {}
 
     @classmethod
-    def build(cls, processed_dir="data/processed"):
+    def build(cls, processed_dir: str | Path = PROCESSED_DIR):
         processed = Path(processed_dir)
         frames = []
 
@@ -49,6 +52,9 @@ class MusicLibrary:
                     "instrumentalness": situnes.get("instrumentalness", 0.0),
                     "popularity": situnes.get("popularity", 45.0),
                     "action_bucket": situnes["action_bucket"].astype(int),
+                    "bucket_hint": situnes.get("bucket_hint", situnes["action_bucket"]).astype(int),
+                    "bucket_is_soft": situnes.get("bucket_is_soft", False),
+                    "eda_impact": situnes.get("eda_impact", 0.0),
                     "source": "situnes",
                     "explicit": False,
                 }
@@ -73,6 +79,9 @@ class MusicLibrary:
                         "instrumentalness": 0.25,
                         "popularity": 35.0,
                         "action_bucket": pmemo["action_bucket"].astype(int),
+                        "bucket_hint": pmemo.get("bucket_hint", pmemo["action_bucket"]).astype(int),
+                        "bucket_is_soft": pmemo.get("bucket_is_soft", True),
+                        "eda_impact": pmemo.get("eda_impact", 0.0),
                         "source": "pmemo",
                         "explicit": False,
                     }
@@ -97,6 +106,9 @@ class MusicLibrary:
                         "instrumentalness": spotify.get("instrumentalness", 0.0),
                         "popularity": spotify.get("popularity", 50.0),
                         "action_bucket": spotify["action_bucket"].astype(int),
+                        "bucket_hint": spotify.get("bucket_hint", spotify["action_bucket"]).astype(int),
+                        "bucket_is_soft": spotify.get("bucket_is_soft", False),
+                        "eda_impact": spotify.get("eda_impact", 0.0),
                         "source": "spotify",
                         "explicit": spotify.get("explicit", False),
                     }
@@ -104,7 +116,11 @@ class MusicLibrary:
             )
 
         combined = pd.concat(frames, ignore_index=True)
-        return cls(combined)
+        user_profiles = {}
+        pref_path = processed / "user_preferences.json"
+        if pref_path.exists():
+            user_profiles = json.loads(pref_path.read_text(encoding="utf-8"))
+        return cls(combined, user_profiles=user_profiles)
 
     @staticmethod
     def _mode_for_bucket(bucket: int, context: dict | str | None = None) -> str:
@@ -125,29 +141,67 @@ class MusicLibrary:
         text = str(genre).lower()
         return sum(0.10 for keyword in MODE_GENRE_BOOSTS.get(mode, []) if keyword in text)
 
-    def _score_tracks(self, bucket: int, mode: str) -> pd.Series:
-        target = bucket_targets(bucket)
-        bucket_df = self.df[self.df["action_bucket"] == bucket].copy()
+    def _resolve_user_profile(self, context: dict | None) -> dict:
+        if context is None:
+            return {}
+        if context.get("user_profile"):
+            return dict(context["user_profile"])
+        user_id = context.get("user_id")
+        if user_id is None:
+            return {}
+        return dict(self.user_profiles.get(str(int(user_id)), {}))
 
-        valence_fit = 1.0 - np.abs(bucket_df["valence"] - target["valence"]) / 0.7
-        energy_fit = 1.0 - np.abs(bucket_df["energy"] - target["energy"]) / 0.7
-        tempo_fit = 1.0 - np.abs(bucket_df["tempo"] - target["tempo"]) / 90.0
-        score = 2.0 * valence_fit + 2.2 * energy_fit + 1.6 * tempo_fit
+    @staticmethod
+    def _genre_preference_bonus(genre: str, profile: dict) -> float:
+        text = str(genre).lower()
+        return sum(0.12 for keyword in profile.get("top_genres", []) if keyword.lower() in text)
+
+    def _score_tracks(self, bucket: int, mode: str, context: dict | None = None) -> pd.Series:
+        target = bucket_targets(bucket)
+        user_profile = self._resolve_user_profile(context or {})
+        pool = self.df.copy()
+
+        valence_fit = 1.0 - np.abs(pool["valence"] - target["valence"]) / 0.7
+        energy_fit = 1.0 - np.abs(pool["energy"] - target["energy"]) / 0.7
+        tempo_fit = 1.0 - np.abs(pool["tempo"] - target["tempo"]) / 90.0
+        score = 1.8 * valence_fit + 2.0 * energy_fit + 1.4 * tempo_fit
+
+        hard_match = (pool["action_bucket"] == bucket) & (~pool["bucket_is_soft"])
+        soft_match = (pool["bucket_hint"] == bucket) & (pool["bucket_is_soft"])
+        score += hard_match.astype(float) * 0.90
+        score += soft_match.astype(float) * 0.20
 
         if mode == "focus":
-            score += 0.8 * bucket_df["instrumentalness"] + 0.5 * bucket_df["acousticness"]
-            score -= 0.9 * bucket_df["speechiness"] + 0.2 * bucket_df["explicit"].astype(float)
+            score += 0.9 * pool["instrumentalness"] + 0.6 * pool["acousticness"]
+            score -= 1.0 * pool["speechiness"] + 0.2 * pool["explicit"].astype(float)
         elif mode == "wind_down":
-            score += 0.7 * bucket_df["acousticness"] + 0.6 * bucket_df["instrumentalness"]
-            score -= 0.8 * bucket_df["speechiness"] + 0.4 * bucket_df["energy"]
-        elif mode == "exercise":
-            score += 0.9 * bucket_df["danceability"] + 0.3 * bucket_df["popularity"] / 100.0
-            score -= 0.3 * bucket_df["acousticness"]
+            score += 0.8 * pool["acousticness"] + 0.7 * pool["instrumentalness"]
+            score -= 0.8 * pool["speechiness"] + 0.4 * pool["energy"]
+        elif mode in {"exercise", "exercise-lite"}:
+            score += 0.9 * pool["danceability"] + 0.3 * pool["popularity"] / 100.0
+            score -= 0.3 * pool["acousticness"]
         else:
-            score += 0.3 * bucket_df["popularity"] / 100.0
+            score += 0.3 * pool["popularity"] / 100.0
 
-        score += bucket_df["genre"].map(lambda text: self._genre_bonus(text, mode))
-        score += bucket_df["source"].map({"situnes": 0.12, "pmemo": 0.08, "spotify": 0.0}).fillna(0.0)
+        if user_profile:
+            val_pref = float(user_profile.get("user_valence_pref", 0.0))
+            energy_pref = float(user_profile.get("user_energy_pref", 0.0))
+            pref_val_target = np.clip(0.5 + 0.25 * val_pref, 0.0, 1.0)
+            pref_energy_target = np.clip(0.5 + 0.25 * energy_pref, 0.0, 1.0)
+            score += 0.45 * (1.0 - np.abs(pool["valence"] - pref_val_target))
+            score += 0.55 * (1.0 - np.abs(pool["energy"] - pref_energy_target))
+
+            acoustic_pref = float(user_profile.get("preferred_acousticness", 0.5))
+            instrumental_pref = float(user_profile.get("preferred_instrumentalness", 0.1))
+            popularity_tolerance = float(user_profile.get("popularity_tolerance", 0.5))
+            score += 0.25 * (1.0 - np.abs(pool["acousticness"] - acoustic_pref))
+            score += 0.20 * (1.0 - np.abs(pool["instrumentalness"] - instrumental_pref))
+            score += 0.18 * (1.0 - np.abs(pool["popularity"] / 100.0 - popularity_tolerance))
+            score += pool["genre"].map(lambda text: self._genre_preference_bonus(text, user_profile))
+
+        score += pool["genre"].map(lambda text: self._genre_bonus(text, mode))
+        score += 0.18 * pool["eda_impact"]
+        score += pool["source"].map({"situnes": 0.10, "pmemo": 0.04, "spotify": 0.0}).fillna(0.0)
         return score
 
     def get_tracks(
@@ -158,13 +212,14 @@ class MusicLibrary:
         exclude_ids: list[int] | None = None,
     ) -> pd.DataFrame:
         mode = self._mode_for_bucket(bucket, context=context)
-        pool = self.df[self.df["action_bucket"] == int(bucket)].copy()
+        pool = self.df.copy()
         if exclude_ids:
             pool = pool[~pool.index.isin(exclude_ids)].copy()
         if pool.empty:
             return pd.DataFrame()
 
-        pool["score"] = self._score_tracks(bucket, mode)
+        score = self._score_tracks(bucket, mode, context=context if isinstance(context, dict) else {"mode": mode})
+        pool = pool.assign(score=score.loc[pool.index].to_numpy())
         pool = pool.sort_values(
             ["score", "popularity", "track_name", "artist"],
             ascending=[False, False, True, True],
@@ -179,8 +234,11 @@ class MusicLibrary:
                 "energy",
                 "tempo",
                 "action_bucket",
+                "bucket_hint",
+                "bucket_is_soft",
                 "source",
                 "popularity",
+                "eda_impact",
                 "score",
             ]
         ].reset_index(drop=True)

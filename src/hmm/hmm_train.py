@@ -15,16 +15,16 @@ from scipy.stats import spearmanr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data.common import MODELS_DIR, PROCESSED_DIR, STATE_NAMES
+from src.data.common import MODELS_DIR, PROCESSED_DIR, STATE_NAMES, hr_bucket
 from src.hmm.hmm_inference import corrected_belief, physical_target_state
 from src.hmm.hmm_model import HMM
 
 
 N_STATES = 3
-N_OBS = 20
+N_OBS = 60
 N_ITER = 40
 TOL = 1e-3
-N_RESTARTS = 3
+N_RESTARTS = 5
 SEED = 42
 
 
@@ -38,17 +38,18 @@ def load_data() -> tuple[pd.DataFrame, np.ndarray, dict]:
 
 def diagonal_transition_init(diagonal: float = 0.90) -> np.ndarray:
     off_diag = (1.0 - diagonal) / (N_STATES - 1)
-    A = np.full((N_STATES, N_STATES), off_diag, dtype=np.float64)
-    np.fill_diagonal(A, diagonal)
-    return A
+    a = np.full((N_STATES, N_STATES), off_diag, dtype=np.float64)
+    np.fill_diagonal(a, diagonal)
+    return a
 
 
 def informed_emission_init(seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    B = np.full((N_STATES, N_OBS), 0.02, dtype=np.float64)
+    b = np.full((N_STATES, N_OBS), 0.02, dtype=np.float64)
 
     for obs in range(N_OBS):
-        intensity = obs // 5
+        hr_band = obs // 20
+        intensity = (obs % 20) // 5
         activity = obs % 5
 
         low = 0.20
@@ -73,12 +74,20 @@ def informed_emission_init(seed: int) -> np.ndarray:
         else:
             high += 2.0
 
+        if hr_band == 0:
+            low += 0.8
+        elif hr_band == 1:
+            moderate += 0.3
+        else:
+            moderate += 1.0
+            high += 0.5
+
         weights = np.asarray([low, moderate, high], dtype=np.float64)
         weights *= rng.lognormal(mean=0.0, sigma=0.10, size=N_STATES)
-        B[:, obs] = weights
+        b[:, obs] = weights
 
-    B /= B.sum(axis=1, keepdims=True)
-    return B
+    b /= b.sum(axis=1, keepdims=True)
+    return b
 
 
 def initialize_model(seed: int) -> HMM:
@@ -93,11 +102,13 @@ def initialize_model(seed: int) -> HMM:
 
 def reorder_states(model: HMM) -> tuple[HMM, list[int]]:
     activity_energy = {0: 0.0, 1: 0.8, 2: 1.2, 3: 0.0, 4: 2.0}
+    hr_energy = {0: -0.4, 1: 0.2, 2: 1.0}
     obs_scores = []
     for obs in range(model.n_obs):
-        intensity = obs // 5
+        hr_band = obs // 20
+        intensity = (obs % 20) // 5
         activity = obs % 5
-        obs_scores.append(float(intensity) + activity_energy[activity])
+        obs_scores.append(float(intensity) + activity_energy[activity] + hr_energy[hr_band])
     obs_scores = np.asarray(obs_scores, dtype=np.float64)
 
     state_scores = model.B @ obs_scores
@@ -132,6 +143,7 @@ def evaluate_physical_alignment(
             physical_target_state(
                 int(row["activity_majority"]),
                 int(row["intensity_bucket_mean"]),
+                hr_bucket(float(row["hr_mean"])),
             )
         )
 
@@ -247,6 +259,8 @@ def main() -> None:
             "belief_temperature": calibration["temperature"],
             "belief_prior_strength": calibration["prior_strength"],
             "state_reorder": reorder,
+            "observation_space": N_OBS,
+            "hr_buckets": "0:<-8, 1:-8..12, 2:>12",
         }
     )
 
