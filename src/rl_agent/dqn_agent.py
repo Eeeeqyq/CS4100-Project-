@@ -18,7 +18,7 @@ from collections import deque
 
 class QNetwork(nn.Module):
 
-    def __init__(self, state_dim=8, action_dim=8, hidden=64):
+    def __init__(self, state_dim=5, action_dim=8, hidden=64):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden), nn.ReLU(),
@@ -67,7 +67,7 @@ class ReplayBuffer:
 
 class DQNAgent:
 
-    def __init__(self, state_dim=8, action_dim=8, lr=1e-3, gamma=0.9,
+    def __init__(self, state_dim=5, action_dim=8, lr=1e-3, gamma=0.9,
                  epsilon=1.0, epsilon_decay=0.995, epsilon_min=0.05,
                  buffer_cap=10_000, batch_size=64, target_sync=10,
                  hidden=64, seed=42):
@@ -171,7 +171,7 @@ class DQNAgent:
             "epsilon":    self.epsilon,
             "episode":    self.episode,
         }, path)
-        print(f"Agent saved → {path}")
+        print(f"Agent saved -> {path}")
 
     def load(self, path):
         ck = torch.load(path, map_location="cpu")
@@ -180,4 +180,4 @@ class DQNAgent:
         self.optimizer.load_state_dict(ck["optimizer"])
         self.epsilon = ck["epsilon"]
         self.episode = ck["episode"]
-        print(f"Agent loaded ← {path}  (episode={self.episode})")
+        print(f"Agent loaded <- {path}  (episode={self.episode})")

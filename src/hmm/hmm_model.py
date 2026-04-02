@@ -1,37 +1,28 @@
 """
-src/hmm/hmm_model.py
-Hidden Markov Model built from scratch using numpy only.
+NumPy-only Hidden Markov Model for 3 latent physical-context states.
 
-Hidden states (6) represent latent psychological mood:
-    0: stressed-high     low valence, high arousal
-    1: anxious-neutral   low valence, medium arousal
-    2: calm-focused      medium valence, medium arousal
-    3: relaxed-low       high valence, low arousal
-    4: happy-energetic   high valence, high arousal
-    5: fatigued          low valence, low arousal
-
-Observations: integers 0-179 encoding wrist signals + environment.
-Encoding: wrist_obs(0-19) * 9 + time_bucket(0-2) * 3 + weather(0-2)
+The canonical HMM in this project is trained on wrist-only observations:
+    obs = intensity_bucket * 5 + activity_remapped
+where obs is an integer in [0, 19].
 """
 
+import json
 import numpy as np
 
 
 class HMM:
 
     STATE_NAMES = [
-        "stressed-high",
-        "anxious-neutral",
-        "calm-focused",
-        "relaxed-low",
-        "happy-energetic",
-        "fatigued",
+        "low-energy",    # lying/still, afternoon/evening
+        "moderate",      # walking/transitioning, morning
+        "high-energy",   # high intensity, running
     ]
 
-    def __init__(self, n_states=6, n_obs=180, seed=42):
+    def __init__(self, n_states=3, n_obs=20, seed=42, metadata=None):
         self.n_states = n_states
         self.n_obs    = n_obs
         self.rng      = np.random.default_rng(seed)
+        self.metadata = metadata or {}
         self._init_params()
 
     # ── Initialisation ────────────────────────────────────────────────────
@@ -62,6 +53,10 @@ class HMM:
         log_alpha[t, s] = log P(o_1..o_t, state_t=s | model)
         """
         obs_seq   = np.asarray(obs_seq, dtype=int)
+        assert obs_seq.min() >= 0 and obs_seq.max() < self.n_obs, (
+            f"forward(): obs values must be in [0, {self.n_obs-1}], "
+            f"got min={obs_seq.min()} max={obs_seq.max()}"
+        )
         T         = len(obs_seq)
         log_alpha = np.full((T, self.n_states), -np.inf)
 
@@ -101,6 +96,10 @@ class HMM:
         Returns most likely state sequence (T,) and its log probability.
         """
         obs_seq = np.asarray(obs_seq, dtype=int)
+        assert obs_seq.min() >= 0 and obs_seq.max() < self.n_obs, (
+            f"viterbi(): obs values must be in [0, {self.n_obs-1}], "
+            f"got min={obs_seq.min()} max={obs_seq.max()}"
+        )
         T       = len(obs_seq)
         delta   = np.full((T, self.n_states), -np.inf)
         psi     = np.zeros((T, self.n_states), dtype=int)
@@ -122,15 +121,21 @@ class HMM:
 
     # ── Belief state ──────────────────────────────────────────────────────
 
-    def belief_state(self, obs_seq):
+    def belief_state(self, obs_seq, temperature: float = 1.0):
         """
         Posterior over hidden states at the final timestep.
         This is the vector fed to the Q-learning agent.
-        Returns shape (n_states,), sums to 1.
+
+        temperature > 1.0 softens the distribution (counters exponential
+        divergence in log_alpha over long identical-observation sequences).
+        Default 1.0 = no change (exact posterior).
+
+        Returns shape (n_states,) float32, sums to 1.
         """
         log_alpha, _ = self.forward(obs_seq)
-        log_b        = log_alpha[-1] - self._logsumexp(log_alpha[-1])
-        return np.exp(log_b)
+        scaled       = log_alpha[-1] / temperature
+        log_b        = scaled - self._logsumexp(scaled)
+        return np.exp(log_b).astype(np.float32)
 
     # ── Baum-Welch EM training ────────────────────────────────────────────
 
@@ -209,15 +214,22 @@ class HMM:
 
     def save(self, path):
         np.savez(path, A=self.A, B=self.B, pi=self.pi,
-                 n_states=self.n_states, n_obs=self.n_obs)
-        print(f"HMM saved → {path}.npz")
+                 n_states=self.n_states, n_obs=self.n_obs,
+                 metadata_json=json.dumps(self.metadata))
+        print(f"HMM saved -> {path}.npz")
 
     @classmethod
     def load(cls, path):
         d = np.load(path)
-        m = cls(n_states=int(d["n_states"]), n_obs=int(d["n_obs"]))
+        metadata = {}
+        if "metadata_json" in d:
+            raw = d["metadata_json"]
+            if isinstance(raw, np.ndarray):
+                raw = raw.item()
+            metadata = json.loads(str(raw))
+        m = cls(n_states=int(d["n_states"]), n_obs=int(d["n_obs"]), metadata=metadata)
         m.set_params(d["A"], d["B"], d["pi"])
-        print(f"HMM loaded ← {path}")
+        print(f"HMM loaded <- {path}")
         return m
 
     # ── Utility ───────────────────────────────────────────────────────────

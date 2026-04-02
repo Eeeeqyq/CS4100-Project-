@@ -1,186 +1,330 @@
 """
-train_agent.py
-Train the DQN agent on SiTunes.
-
-Run from project root:
-    python train_agent.py
-
-Prerequisites (run first):
-    python src/hmm/hmm_train.py
-
-Reads:  data/processed/stage2_clean.csv
-        data/processed/stage3_clean.csv
-        data/processed/wrist2_encoded.npy
-        data/processed/wrist3_encoded.npy
-        models/hmm.npz
-
-Writes: models/agent.pt
-        models/training_log.csv
+Train the Double DQN policy against the hierarchical context-action reward model.
 """
 
-import sys
-import numpy as np
-import pandas as pd
+from __future__ import annotations
+
+import argparse
+import json
 from pathlib import Path
 
-sys.path.insert(0, ".")
-from src.hmm.hmm_model        import HMM
-from src.rl_agent.environment  import MusicEnv
-from src.rl_agent.dqn_agent    import DQNAgent
+import numpy as np
+import pandas as pd
+import torch
 
-PROCESSED  = Path("data/processed")
-MODELS     = Path("models")
-
-# ── Hyperparameters ───────────────────────────────────────────────────────
-N_EPISODES    = 2000
-BURN_IN       = 200    # random episodes before training starts
-LOG_EVERY     = 100
-EVAL_EVERY    = 200
-EVAL_EPS      = 50
-
-LR            = 1e-3
-GAMMA         = 0.9
-EPS_START     = 1.0
-EPS_DECAY     = 0.995
-EPS_MIN       = 0.05
-BATCH_SIZE    = 64
-BUFFER_CAP    = 10_000
-TARGET_SYNC   = 10
-HIDDEN        = 64
-SEED          = 42
+from src.data.common import MODELS_DIR, PROCESSED_DIR
+from src.rl_agent.dqn_agent import DQNAgent
+from src.rl_agent.environment import MusicEnv
+from src.rl_agent.reward_model import HierarchicalRewardModel
 
 
-def load_data():
-    df2    = pd.read_csv(PROCESSED / "stage2_clean.csv")
-    df3    = pd.read_csv(PROCESSED / "stage3_clean.csv")
-    wrist2 = np.load(PROCESSED / "wrist2_encoded.npy")
-    wrist3 = np.load(PROCESSED / "wrist3_encoded.npy")
-
-    # Stage3 obs_idx must be offset by len(df2) so it indexes into stacked wrist
-    df3         = df3.copy()
-    df3["obs_idx"] = df3["obs_idx"] + len(df2)
-
-    df    = pd.concat([df2, df3], ignore_index=True)
-    wrist = np.vstack([wrist2, wrist3])
-
-    print(f"Interactions: {len(df)}  users: {df.user_id.nunique()}")
-    return df, wrist
+N_EPISODES = 4500
+BURN_IN = 400
+LR = 1e-3
+GAMMA = 0.90
+EPS_START = 1.0
+EPS_DECAY = 0.997
+EPS_MIN = 0.05
+BATCH_SIZE = 128
+BUFFER_CAP = 20_000
+TARGET_SYNC = 20
+HIDDEN = 64
+EVAL_EVERY = 150
+SEED = 42
 
 
-def evaluate(agent, env, n=50):
-    total, lifts, drops, steps = 0, 0, 0, 0
-    for _ in range(n):
-        state = env.reset()
-        while True:
-            action              = agent.greedy_action(state)
-            state, r, done, _   = env.step(action)
-            total  += r
-            steps  += 1
-            if r > 0: lifts += 1
-            if r < 0: drops += 1
-            if done: break
-    mean_r = total / n
-    lift_r = lifts / steps if steps else 0
-    drop_r = drops / steps if steps else 0
-    return mean_r, lift_r, drop_r
+def load_real_data() -> tuple[pd.DataFrame, np.ndarray]:
+    df = pd.read_csv(PROCESSED_DIR / "interactions_clean.csv")
+    states = np.load(PROCESSED_DIR / "state_vectors.npy")
+    df["hmm_state"] = states[:, :3].argmax(axis=1)
+    df["belief_0"] = states[:, 0]
+    df["belief_1"] = states[:, 1]
+    df["belief_2"] = states[:, 2]
+    df["is_synthetic"] = False
+    return df, states
 
 
-def main():
-    # Load
-    df, wrist = load_data()
-    hmm = HMM.load(str(MODELS / "hmm.npz"))
+def load_synthetic() -> tuple[pd.DataFrame | None, np.ndarray | None]:
+    syn_csv = PROCESSED_DIR / "synthetic_clean.csv"
+    syn_npy = PROCESSED_DIR / "synthetic_state_vectors.npy"
+    if not syn_csv.exists() or not syn_npy.exists():
+        return None, None
+    df = pd.read_csv(syn_csv)
+    states = np.load(syn_npy)
+    if "hmm_state" not in df.columns:
+        df["hmm_state"] = states[:, :3].argmax(axis=1)
+    if "is_synthetic" not in df.columns:
+        df["is_synthetic"] = True
+    return df, states
 
-    # Environments
-    env      = MusicEnv(df, wrist, hmm, seed=SEED)
-    eval_env = MusicEnv(df, wrist, hmm, seed=SEED+1)
+
+def build_or_load_reward_model(train_df: pd.DataFrame) -> HierarchicalRewardModel:
+    path = MODELS_DIR / "reward_model.json"
+    if path.exists():
+        return HierarchicalRewardModel.load(path)
+    model = HierarchicalRewardModel(seed=SEED).fit(train_df)
+    model.save(path)
+    return model
+
+
+def evaluate_policy(
+    actions: np.ndarray,
+    df: pd.DataFrame,
+    reward_model: HierarchicalRewardModel,
+) -> dict:
+    expected_rewards = []
+    positive_probs = []
+    oracle_rewards = []
+    historical_match = []
+    for action, (_, row) in zip(actions, df.iterrows()):
+        context_rewards = [
+            reward_model.expected_reward(
+                int(row["hmm_state"]),
+                int(row["time_bucket"]),
+                int(row["activity_majority"]),
+                bucket,
+            )
+            for bucket in range(8)
+        ]
+        expected_rewards.append(context_rewards[int(action)])
+        positive_probs.append(
+            reward_model.positive_prob(
+                int(row["hmm_state"]),
+                int(row["time_bucket"]),
+                int(row["activity_majority"]),
+                int(action),
+            )
+        )
+        oracle_rewards.append(max(context_rewards))
+        historical_match.append(int(action) == int(row.get("action_bucket", -1)))
+
+    expected_rewards = np.asarray(expected_rewards, dtype=np.float64)
+    positive_probs = np.asarray(positive_probs, dtype=np.float64)
+    oracle_rewards = np.asarray(oracle_rewards, dtype=np.float64)
+    historical_match = np.asarray(historical_match, dtype=np.float64)
+
+    action_counts = np.bincount(actions, minlength=8).astype(np.float64)
+    action_probs = action_counts / max(action_counts.sum(), 1.0)
+    action_entropy = float(-np.sum(action_probs * np.log(action_probs + 1e-12)))
+
+    return {
+        "mean_expected_reward": float(expected_rewards.mean()),
+        "mean_positive_prob": float(positive_probs.mean()),
+        "mean_regret": float((oracle_rewards - expected_rewards).mean()),
+        "historical_match_rate": float(historical_match.mean()),
+        "action_entropy": action_entropy,
+        "action_counts": {str(i): int(c) for i, c in enumerate(action_counts.astype(int))},
+    }
+
+
+def policy_actions(agent: DQNAgent, states: np.ndarray) -> np.ndarray:
+    return np.asarray([agent.greedy_action(state) for state in states], dtype=np.int32)
+
+
+def baseline_actions_state_prior(train_df: pd.DataFrame, reward_model: HierarchicalRewardModel, df: pd.DataFrame) -> np.ndarray:
+    state_best = {}
+    for hmm_state in range(3):
+        scores = []
+        subset = train_df[train_df["hmm_state"] == hmm_state]
+        if subset.empty:
+            subset = train_df
+        time_mode = int(subset["time_bucket"].mode().iloc[0])
+        activity_mode = int(subset["activity_majority"].mode().iloc[0])
+        for action in range(8):
+            scores.append(reward_model.expected_reward(hmm_state, time_mode, activity_mode, action))
+        state_best[hmm_state] = int(np.argmax(scores))
+    return df["hmm_state"].map(state_best).to_numpy(dtype=np.int32)
+
+
+def train(args: argparse.Namespace) -> None:
+    MODELS_DIR.mkdir(exist_ok=True)
+    real_df, real_states = load_real_data()
+    train_df = real_df[real_df["split"] == "train"].reset_index(drop=True)
+    val_df = real_df[real_df["split"] == "val"].reset_index(drop=True)
+    test_df = real_df[real_df["split"] == "test"].reset_index(drop=True)
+    train_states = real_states[real_df["split"].to_numpy() == "train"]
+    val_states = real_states[real_df["split"].to_numpy() == "val"]
+    test_states = real_states[real_df["split"].to_numpy() == "test"]
+
+    reward_model = build_or_load_reward_model(train_df)
+
+    env_df = train_df.copy()
+    env_states = train_states.copy()
+    sample_weights = np.ones(len(env_df), dtype=np.float64)
+
+    if args.synthetic_weight > 0:
+        synthetic_df, synthetic_states = load_synthetic()
+        if synthetic_df is not None and synthetic_states is not None:
+            env_df = pd.concat([env_df, synthetic_df], ignore_index=True)
+            env_states = np.vstack([env_states, synthetic_states])
+            sample_weights = np.concatenate(
+                [
+                    np.ones(len(train_df), dtype=np.float64),
+                    np.full(len(synthetic_df), float(args.synthetic_weight), dtype=np.float64),
+                ]
+            )
+
+    env = MusicEnv(env_df, env_states, reward_model=reward_model, sample_weights=sample_weights, seed=SEED)
     print(env)
+    print(f"  real_train={len(train_df)}  val={len(val_df)}  test={len(test_df)}")
+    print(f"  synthetic_weight={args.synthetic_weight:.2f}  total_env_contexts={len(env_df)}")
 
-    # Agent
     agent = DQNAgent(
-        state_dim=MusicEnv.STATE_DIM, action_dim=MusicEnv.ACTION_DIM,
-        lr=LR, gamma=GAMMA, epsilon=EPS_START, epsilon_decay=EPS_DECAY,
-        epsilon_min=EPS_MIN, buffer_cap=BUFFER_CAP, batch_size=BATCH_SIZE,
-        target_sync=TARGET_SYNC, hidden=HIDDEN, seed=SEED,
+        state_dim=MusicEnv.STATE_DIM,
+        action_dim=MusicEnv.ACTION_DIM,
+        lr=LR,
+        gamma=GAMMA,
+        epsilon=EPS_START,
+        epsilon_decay=EPS_DECAY,
+        epsilon_min=EPS_MIN,
+        buffer_cap=BUFFER_CAP,
+        batch_size=BATCH_SIZE,
+        target_sync=TARGET_SYNC,
+        hidden=HIDDEN,
+        seed=SEED,
     )
 
-    # Burn-in: fill replay buffer with random transitions
-    print(f"\nBurn-in ({BURN_IN} episodes)...")
     for _ in range(BURN_IN):
         state = env.reset()
-        while True:
-            a              = env.sample_action()
-            ns, r, done, _ = env.step(a)
-            agent.replay.push(state, a, r, ns, done)
-            state = ns
-            if done: break
-    print(f"Buffer size: {len(agent.replay)}")
+        action = env.sample_action()
+        next_state, reward, done, _ = env.step(action)
+        agent.replay.push(state, action, reward, next_state, done)
 
-    # Training
-    print(f"\nTraining {N_EPISODES} episodes...")
-    print(f"{'Ep':>6}  {'MeanR':>7}  {'Lift%':>6}  {'Drop%':>6}  "
-          f"{'ε':>5}  {'Loss':>7}")
-    print("─" * 50)
+    best_val = -np.inf
+    best_checkpoint = None
+    log_rows = []
 
-    ep_rewards, ep_losses, log = [], [], []
+    print("\nTraining Double DQN on one-step contexts...")
+    for episode in range(1, N_EPISODES + 1):
+        state = env.reset()
+        action = agent.select_action(state)
+        next_state, reward, done, _ = env.step(action)
+        agent.replay.push(state, action, reward, next_state, done)
 
-    for ep in range(1, N_EPISODES+1):
-        state      = env.reset()
-        ep_reward  = 0
-        ep_loss    = []
-
-        while True:
-            a              = agent.select_action(state)
-            ns, r, done, _ = env.step(a)
-            agent.replay.push(state, a, r, ns, done)
-            loss = agent.update()
-            if loss: ep_loss.append(loss)
-            ep_reward += r
-            state      = ns
-            if done: break
+        loss = agent.update()
+        if episode % 3 == 0:
+            extra_loss = agent.update()
+            if extra_loss:
+                loss = float((loss + extra_loss) / 2.0) if loss else extra_loss
 
         agent.end_episode()
-        ep_rewards.append(ep_reward)
-        if ep_loss: ep_losses.append(np.mean(ep_loss))
 
-        if ep % LOG_EVERY == 0:
-            mr   = np.mean(ep_rewards[-LOG_EVERY:])
-            ml   = np.mean(ep_losses[-LOG_EVERY:]) if ep_losses else 0
+        if episode % EVAL_EVERY == 0 or episode == 1:
+            val_actions = policy_actions(agent, val_states)
+            val_metrics = evaluate_policy(val_actions, val_df, reward_model)
+            train_actions = policy_actions(agent, train_states[: min(256, len(train_states))])
+            preview_metrics = evaluate_policy(
+                train_actions,
+                train_df.iloc[: min(256, len(train_df))].reset_index(drop=True),
+                reward_model,
+            )
 
-            if ep % EVAL_EVERY == 0:
-                er, lift, drop = evaluate(agent, eval_env, EVAL_EPS)
-                print(f"{ep:>6}  {er:>7.3f}  {lift*100:>5.1f}%  "
-                      f"{drop*100:>5.1f}%  {agent.epsilon:>5.3f}  {ml:>7.4f}  ←eval")
-                log.append({"ep": ep, "eval_reward": er,
-                             "lift": lift, "drop": drop,
-                             "epsilon": agent.epsilon, "loss": ml})
-            else:
-                print(f"{ep:>6}  {mr:>7.3f}  {'—':>6}  {'—':>6}  "
-                      f"{agent.epsilon:>5.3f}  {ml:>7.4f}")
-                log.append({"ep": ep, "eval_reward": None,
-                             "lift": None, "drop": None,
-                             "epsilon": agent.epsilon, "loss": ml})
+            row = {
+                "episode": episode,
+                "loss": float(loss or 0.0),
+                "epsilon": float(agent.epsilon),
+                "val_expected_reward": val_metrics["mean_expected_reward"],
+                "val_positive_prob": val_metrics["mean_positive_prob"],
+                "val_regret": val_metrics["mean_regret"],
+                "val_action_entropy": val_metrics["action_entropy"],
+                "preview_expected_reward": preview_metrics["mean_expected_reward"],
+            }
+            log_rows.append(row)
+            print(
+                f"  ep={episode:4d}  val_exp={val_metrics['mean_expected_reward']:+.4f}  "
+                f"val_regret={val_metrics['mean_regret']:.4f}  "
+                f"entropy={val_metrics['action_entropy']:.3f}  eps={agent.epsilon:.3f}"
+            )
 
-    # Save
-    MODELS.mkdir(exist_ok=True)
-    agent.save(str(MODELS / "agent.pt"))
-    pd.DataFrame(log).to_csv(MODELS / "training_log.csv", index=False)
+            if val_metrics["mean_expected_reward"] > best_val:
+                best_val = val_metrics["mean_expected_reward"]
+                best_checkpoint = {
+                    "q_net": {k: v.detach().cpu().clone() for k, v in agent.q_net.state_dict().items()},
+                    "target_net": {k: v.detach().cpu().clone() for k, v in agent.target_net.state_dict().items()},
+                    "optimizer": agent.optimizer.state_dict(),
+                    "episode": agent.episode,
+                    "epsilon": agent.epsilon,
+                }
 
-    # Final eval
-    print("\n" + "="*50)
-    print("FINAL EVALUATION (greedy, 100 episodes)")
-    er, lift, drop = evaluate(agent, eval_env, 100)
-    print(f"  Mean reward: {er:.3f}")
-    print(f"  Lift rate:   {lift*100:.1f}%")
-    print(f"  Drop rate:   {drop*100:.1f}%")
+    if best_checkpoint is None:
+        raise RuntimeError("Training completed without producing a checkpoint.")
 
-    # Random baseline
-    rand = DQNAgent(epsilon=1.0, epsilon_min=1.0)
-    rr, rl, rd = evaluate(rand, eval_env, 100)
-    print(f"\nRandom baseline:")
-    print(f"  Mean reward: {rr:.3f}")
-    print(f"  Lift rate:   {rl*100:.1f}%")
-    print(f"\nImproved over random: {'YES ✓' if lift > rl else 'NO — tune hyperparameters'}")
-    print("\n✓ Done. Next: python demo.py")
+    agent.q_net.load_state_dict(best_checkpoint["q_net"])
+    agent.target_net.load_state_dict(best_checkpoint["target_net"])
+    agent.optimizer.load_state_dict(best_checkpoint["optimizer"])
+    agent.episode = int(best_checkpoint["episode"])
+    agent.epsilon = float(best_checkpoint["epsilon"])
+    agent.save(MODELS_DIR / "agent.pt")
+
+    test_actions = policy_actions(agent, test_states)
+    test_metrics = evaluate_policy(test_actions, test_df, reward_model)
+    always7_metrics = evaluate_policy(np.full(len(test_df), 7, dtype=np.int32), test_df, reward_model)
+    random_expected = []
+    for _, row in test_df.iterrows():
+        per_action = [
+            reward_model.expected_reward(
+                int(row["hmm_state"]),
+                int(row["time_bucket"]),
+                int(row["activity_majority"]),
+                action,
+            )
+            for action in range(8)
+        ]
+        random_expected.append(np.mean(per_action))
+    random_metrics = {"mean_expected_reward": float(np.mean(random_expected))}
+    state_prior_actions = baseline_actions_state_prior(train_df, reward_model, test_df)
+    state_prior_metrics = evaluate_policy(state_prior_actions, test_df, reward_model)
+
+    summary = {
+        "config": {
+            "episodes": N_EPISODES,
+            "burn_in": BURN_IN,
+            "lr": LR,
+            "gamma": GAMMA,
+            "epsilon_start": EPS_START,
+            "epsilon_decay": EPS_DECAY,
+            "epsilon_min": EPS_MIN,
+            "batch_size": BATCH_SIZE,
+            "buffer_cap": BUFFER_CAP,
+            "target_sync": TARGET_SYNC,
+            "hidden": HIDDEN,
+            "synthetic_weight": args.synthetic_weight,
+        },
+        "best_val_expected_reward": best_val,
+        "test_metrics": test_metrics,
+        "baselines": {
+            "always7": always7_metrics,
+            "random_uniform_expected_reward": random_metrics,
+            "state_prior": state_prior_metrics,
+        },
+    }
+
+    pd.DataFrame(log_rows).to_csv(MODELS_DIR / "training_log.csv", index=False)
+    (MODELS_DIR / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    print("\nTest-set policy summary:")
+    print(f"  DQN mean expected reward:      {test_metrics['mean_expected_reward']:+.4f}")
+    print(f"  DQN mean regret:               {test_metrics['mean_regret']:.4f}")
+    print(f"  DQN action entropy:            {test_metrics['action_entropy']:.3f}")
+    print(f"  Always-7 expected reward:      {always7_metrics['mean_expected_reward']:+.4f}")
+    print(f"  State-prior expected reward:   {state_prior_metrics['mean_expected_reward']:+.4f}")
+    print(f"  Random uniform exp. reward:    {random_metrics['mean_expected_reward']:+.4f}")
+    print("\nSaved:")
+    print("  models/agent.pt")
+    print("  models/training_log.csv")
+    print("  models/training_summary.json")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train the Double DQN policy.")
+    parser.add_argument(
+        "--synthetic-weight",
+        type=float,
+        default=0.35,
+        help="Sampling weight applied to synthetic contexts relative to real contexts.",
+    )
+    args = parser.parse_args()
+    train(args)
 
 
 if __name__ == "__main__":

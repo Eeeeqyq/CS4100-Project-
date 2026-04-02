@@ -1,101 +1,293 @@
 """
-src/hmm/hmm_train.py
-Train the HMM on SiTunes wrist observation sequences.
-
-Run from project root:
-    python src/hmm/hmm_train.py
-
-Reads:  data/processed/wrist2_encoded.npy
-        data/processed/wrist3_encoded.npy
-        data/processed/stage2_clean.csv
-        data/processed/stage3_clean.csv
-
-Writes: models/hmm.npz
+Train the wrist-only 3-state HMM on the train split and calibrate belief fusion
+on the validation split.
 """
 
+from __future__ import annotations
+
+import json
 import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from scipy.stats import spearmanr
 
-# Add project root to path so `from src.hmm.hmm_model import HMM` works
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.data.common import MODELS_DIR, PROCESSED_DIR, STATE_NAMES
+from src.hmm.hmm_inference import corrected_belief, physical_target_state
 from src.hmm.hmm_model import HMM
 
-PROCESSED  = Path("data/processed")
-MODELS     = Path("models")
-MODELS.mkdir(exist_ok=True)
 
-N_STATES   = 6
-N_OBS      = 180
-N_ITER     = 80
-TOL        = 1e-3
+N_STATES = 3
+N_OBS = 20
+N_ITER = 40
+TOL = 1e-3
 N_RESTARTS = 3
-SEED       = 42
+SEED = 42
 
 
-def load_data():
-    wrist2 = np.load(PROCESSED / "wrist2_encoded.npy")   # (897, 30)
-    wrist3 = np.load(PROCESSED / "wrist3_encoded.npy")   # (509, 30)
-    wrist  = np.vstack([wrist2, wrist3])                  # (1406, 30)
-
-    df2 = pd.read_csv(PROCESSED / "stage2_clean.csv")
-    df3 = pd.read_csv(PROCESSED / "stage3_clean.csv")
-    df  = pd.concat([df2, df3], ignore_index=True)
-
-    sequences   = [wrist[i] for i in range(len(wrist))]
-    pre_valence = df["emo_pre_valence"].values
-    pre_arousal = df["emo_pre_arousal"].values
-
-    print(f"Sequences: {len(sequences)}  length: {wrist.shape[1]}")
-    print(f"Obs range: {wrist.min()} – {wrist.max()}  (should be 0–179)")
-    return sequences, pre_valence, pre_arousal
+def load_data() -> tuple[pd.DataFrame, np.ndarray, dict]:
+    df = pd.read_csv(PROCESSED_DIR / "interactions_clean.csv")
+    wrist_obs = np.load(PROCESSED_DIR / "wrist_obs_all.npy")
+    with (PROCESSED_DIR / "split_manifest.json").open("r", encoding="utf-8") as handle:
+        split_manifest = json.load(handle)
+    return df, wrist_obs, split_manifest
 
 
-def validate(model, sequences, pre_valence, pre_arousal):
-    decoded = np.array([model.viterbi(s)[0][-1] for s in sequences])
-
-    print("\nMean pre-valence per decoded state:")
-    for s in range(model.n_states):
-        mask = decoded == s
-        if mask.sum() == 0:
-            print(f"  S{s} {HMM.STATE_NAMES[s]:<20}: UNUSED")
-            continue
-        mv = pre_valence[mask].mean()
-        ma = pre_arousal[mask].mean()
-        print(f"  S{s} {HMM.STATE_NAMES[s]:<20}: n={mask.sum():3d}  "
-              f"valence={mv:+.3f}  arousal={ma:+.3f}")
-
-    r_v, _ = spearmanr(decoded, pre_valence)
-    r_a, _ = spearmanr(decoded, pre_arousal)
-    print(f"\nSpearman r vs pre_valence: {r_v:.3f}")
-    print(f"Spearman r vs pre_arousal: {r_a:.3f}")
+def diagonal_transition_init(diagonal: float = 0.90) -> np.ndarray:
+    off_diag = (1.0 - diagonal) / (N_STATES - 1)
+    A = np.full((N_STATES, N_STATES), off_diag, dtype=np.float64)
+    np.fill_diagonal(A, diagonal)
+    return A
 
 
-def main():
-    sequences, pre_valence, pre_arousal = load_data()
+def informed_emission_init(seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    B = np.full((N_STATES, N_OBS), 0.02, dtype=np.float64)
+
+    for obs in range(N_OBS):
+        intensity = obs // 5
+        activity = obs % 5
+
+        low = 0.20
+        moderate = 0.20
+        high = 0.20
+
+        if activity in {0, 3}:
+            low += 2.0
+        if activity in {1, 2}:
+            moderate += 1.6
+        if activity == 4:
+            high += 2.6
+
+        if intensity == 0:
+            low += 1.5
+        elif intensity == 1:
+            low += 0.4
+            moderate += 0.8
+        elif intensity == 2:
+            moderate += 1.1
+            high += 0.6
+        else:
+            high += 2.0
+
+        weights = np.asarray([low, moderate, high], dtype=np.float64)
+        weights *= rng.lognormal(mean=0.0, sigma=0.10, size=N_STATES)
+        B[:, obs] = weights
+
+    B /= B.sum(axis=1, keepdims=True)
+    return B
+
+
+def initialize_model(seed: int) -> HMM:
+    model = HMM(n_states=N_STATES, n_obs=N_OBS, seed=seed)
+    model.set_params(
+        diagonal_transition_init(diagonal=0.90),
+        informed_emission_init(seed=seed),
+        np.asarray([0.40, 0.30, 0.30], dtype=np.float64),
+    )
+    return model
+
+
+def reorder_states(model: HMM) -> tuple[HMM, list[int]]:
+    activity_energy = {0: 0.0, 1: 0.8, 2: 1.2, 3: 0.0, 4: 2.0}
+    obs_scores = []
+    for obs in range(model.n_obs):
+        intensity = obs // 5
+        activity = obs % 5
+        obs_scores.append(float(intensity) + activity_energy[activity])
+    obs_scores = np.asarray(obs_scores, dtype=np.float64)
+
+    state_scores = model.B @ obs_scores
+    order = np.argsort(state_scores)
+    model.set_params(
+        model.A[np.ix_(order, order)],
+        model.B[order],
+        model.pi[order],
+    )
+    return model, order.astype(int).tolist()
+
+
+def evaluate_physical_alignment(
+    model: HMM,
+    df: pd.DataFrame,
+    sequences: np.ndarray,
+    temperature: float,
+    prior_strength: float,
+) -> dict:
+    beliefs = []
+    targets = []
+    for idx, row in df.iterrows():
+        belief = corrected_belief(
+            model,
+            sequences[idx],
+            int(row["activity_majority"]),
+            temperature=temperature,
+            prior_strength=prior_strength,
+        )
+        beliefs.append(belief)
+        targets.append(
+            physical_target_state(
+                int(row["activity_majority"]),
+                int(row["intensity_bucket_mean"]),
+            )
+        )
+
+    beliefs = np.asarray(beliefs, dtype=np.float32)
+    preds = beliefs.argmax(axis=1)
+    targets = np.asarray(targets, dtype=np.int32)
+    entropy = -np.sum(beliefs * np.log(beliefs + 1e-12), axis=1)
+
+    return {
+        "accuracy": float((preds == targets).mean()),
+        "mean_entropy": float(entropy.mean()),
+        "state_usage": {int(k): int(v) for k, v in zip(*np.unique(preds, return_counts=True))},
+    }
+
+
+def calibrate_belief(model: HMM, val_df: pd.DataFrame, val_sequences: np.ndarray) -> dict:
+    best = None
+    for temperature in [1.0, 1.1, 1.25, 1.4, 1.6, 1.8]:
+        for prior_strength in [0.50, 0.75, 1.0, 1.25, 1.5]:
+            metrics = evaluate_physical_alignment(
+                model,
+                val_df,
+                val_sequences,
+                temperature=temperature,
+                prior_strength=prior_strength,
+            )
+            used_states = len(metrics["state_usage"])
+            score = metrics["accuracy"] + 0.15 * min(metrics["mean_entropy"], 0.65) + 0.03 * used_states
+            candidate = {
+                "temperature": temperature,
+                "prior_strength": prior_strength,
+                "score": round(float(score), 6),
+                **metrics,
+            }
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+    return best
+
+
+def diagnostic_summary(
+    model: HMM,
+    df: pd.DataFrame,
+    sequences: np.ndarray,
+    calibration: dict,
+) -> dict:
+    beliefs = []
+    decoded = []
+    for idx, row in df.iterrows():
+        beliefs.append(
+            corrected_belief(
+                model,
+                sequences[idx],
+                int(row["activity_majority"]),
+                temperature=calibration["temperature"],
+                prior_strength=calibration["prior_strength"],
+            )
+        )
+        decoded.append(int(model.viterbi(sequences[idx])[0][-1]))
+
+    beliefs = np.asarray(beliefs, dtype=np.float32)
+    decoded = np.asarray(decoded, dtype=np.int32)
+    corrected = beliefs.argmax(axis=1)
+    entropy = -np.sum(beliefs * np.log(beliefs + 1e-12), axis=1)
+
+    summary = {
+        "decoded_usage": {int(k): int(v) for k, v in zip(*np.unique(decoded, return_counts=True))},
+        "corrected_usage": {int(k): int(v) for k, v in zip(*np.unique(corrected, return_counts=True))},
+        "belief_entropy_mean": float(entropy.mean()),
+        "belief_unique_rows_rounded": int(np.unique(np.round(beliefs, 4), axis=0).shape[0]),
+        "spearman_pre_valence": float(spearmanr(corrected, df["emo_pre_valence"]).statistic),
+        "spearman_pre_arousal": float(spearmanr(corrected, df["emo_pre_arousal"]).statistic),
+    }
+    return summary
+
+
+def main() -> None:
+    MODELS_DIR.mkdir(exist_ok=True)
+    df, wrist_obs, split_manifest = load_data()
+
+    train_idx = np.asarray(split_manifest["train"]["row_indices"], dtype=np.int32)
+    val_idx = np.asarray(split_manifest["val"]["row_indices"], dtype=np.int32)
+    test_idx = np.asarray(split_manifest["test"]["row_indices"], dtype=np.int32)
+
+    train_df = df.iloc[train_idx].reset_index(drop=True)
+    val_df = df.iloc[val_idx].reset_index(drop=True)
+    test_df = df.iloc[test_idx].reset_index(drop=True)
+
+    train_sequences = wrist_obs[train_idx]
+    val_sequences = wrist_obs[val_idx]
+    test_sequences = wrist_obs[test_idx]
 
     best_model = None
-    best_ll    = -np.inf
+    best_curve = []
+    best_ll = -np.inf
 
     for restart in range(N_RESTARTS):
-        print(f"\n{'='*50}")
-        print(f"Restart {restart+1}/{N_RESTARTS}  (seed={SEED + restart*100})")
-        print(f"{'='*50}")
-
-        model    = HMM(n_states=N_STATES, n_obs=N_OBS, seed=SEED + restart*100)
-        ll_curve = model.baum_welch(sequences, n_iter=N_ITER, tol=TOL, verbose=True)
-
-        if ll_curve[-1] > best_ll:
-            best_ll    = ll_curve[-1]
+        seed = SEED + restart * 101
+        print(f"\nRestart {restart + 1}/{N_RESTARTS} (seed={seed})")
+        model = initialize_model(seed)
+        curve = model.baum_welch(train_sequences, n_iter=N_ITER, tol=TOL, verbose=True)
+        if curve[-1] > best_ll:
             best_model = model
-            print(f"  ★ New best  (ll={best_ll:.2f})")
+            best_curve = curve
+            best_ll = curve[-1]
+            print(f"  New best log-likelihood: {best_ll:.2f}")
 
-    print(f"\nBest log-likelihood: {best_ll:.2f}")
-    validate(best_model, sequences, pre_valence, pre_arousal)
-    best_model.save(str(MODELS / "hmm"))
-    print("\n✓ Done. Next: python train_agent.py")
+    assert best_model is not None
+    best_model, reorder = reorder_states(best_model)
+    calibration = calibrate_belief(best_model, val_df, val_sequences)
+    best_model.metadata.update(
+        {
+            "state_names": STATE_NAMES,
+            "belief_temperature": calibration["temperature"],
+            "belief_prior_strength": calibration["prior_strength"],
+            "state_reorder": reorder,
+        }
+    )
+
+    metrics = {
+        "train": diagnostic_summary(best_model, train_df, train_sequences, calibration),
+        "val": diagnostic_summary(best_model, val_df, val_sequences, calibration),
+        "test": diagnostic_summary(best_model, test_df, test_sequences, calibration),
+        "calibration": calibration,
+        "train_log_likelihood": float(best_ll),
+    }
+
+    print("\nValidation calibration:")
+    print(
+        f"  temperature={calibration['temperature']:.2f}  "
+        f"prior_strength={calibration['prior_strength']:.2f}  "
+        f"accuracy={calibration['accuracy']:.3f}  "
+        f"entropy={calibration['mean_entropy']:.3f}"
+    )
+    print("\nBelief-space diagnostics:")
+    for split_name in ["train", "val", "test"]:
+        split_metrics = metrics[split_name]
+        print(
+            f"  {split_name:<5} entropy={split_metrics['belief_entropy_mean']:.3f}  "
+            f"unique={split_metrics['belief_unique_rows_rounded']:>3d}  "
+            f"usage={split_metrics['corrected_usage']}"
+        )
+
+    best_model.save(str(MODELS_DIR / "hmm"))
+    pd.DataFrame(
+        {
+            "iteration": range(1, len(best_curve) + 1),
+            "log_likelihood": best_curve,
+        }
+    ).to_csv(MODELS_DIR / "hmm_convergence.csv", index=False)
+    with (MODELS_DIR / "hmm_metrics.json").open("w", encoding="utf-8") as handle:
+        json.dump(metrics, handle, indent=2)
+
+    print("\nSaved:")
+    print("  models/hmm.npz")
+    print("  models/hmm_convergence.csv")
+    print("  models/hmm_metrics.json")
 
 
 if __name__ == "__main__":
