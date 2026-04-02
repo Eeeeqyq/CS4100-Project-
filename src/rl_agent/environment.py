@@ -1,130 +1,104 @@
 """
-src/rl_agent/environment.py
-Wraps cleaned SiTunes data as a gym-style MDP.
-
-State  : 8-dim float32  [belief_0..5, time_norm, activity_norm]
-Action : int 0-7        music mood bucket
-Reward : -1 / 0 / +1   from pre/post psychological ratings
-Episode: one user's consecutive session (sorted by timestamp)
+One-step offline environment driven by a context-action reward model.
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.hmm.hmm_model import HMM
+from src.data.common import ACTION_DIM, STATE_DIM
 
 
 class MusicEnv:
+    STATE_DIM = STATE_DIM
+    ACTION_DIM = ACTION_DIM
 
-    STATE_DIM  = 8
-    ACTION_DIM = 8
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        states: np.ndarray,
+        reward_model,
+        sample_weights: np.ndarray | None = None,
+        reward_mode: str = "expected",
+        seed: int = 42,
+    ):
+        self.df = df.reset_index(drop=True)
+        self.states = np.asarray(states, dtype=np.float32)
+        self.reward_model = reward_model
+        self.rng = np.random.default_rng(seed)
+        self.reward_mode = reward_mode
+        self.sample_weights = None
+        if sample_weights is not None:
+            sample_weights = np.asarray(sample_weights, dtype=np.float64)
+            self.sample_weights = sample_weights / sample_weights.sum()
 
-    def __init__(self, df: pd.DataFrame, wrist: np.ndarray,
-                 hmm: HMM, seed: int = 42):
-        """
-        Parameters
-        ----------
-        df    : combined stage2+stage3 clean DataFrame
-        wrist : combined wrist2+wrist3 encoded array, shape (N, 30)
-        hmm   : trained HMM
-        seed  : random seed
-        """
-        self.df    = df.reset_index(drop=True)
-        self.wrist = wrist
-        self.hmm   = hmm
-        self.rng   = np.random.default_rng(seed)
+        self._row_idx: int | None = None
+        self._done = True
 
-        self._sessions = self._build_sessions()
-        self._ptr      = 0
-        self._rows     = []
-        self._done     = True
-
-    # ── Episode management ────────────────────────────────────────────────
-
-    def _build_sessions(self):
-        """Group row indices by user, sorted by timestamp."""
-        sessions = {}
-        for uid, grp in self.df.groupby("user_id"):
-            idx = grp.sort_values("timestamp").index.tolist()
-            if len(idx) >= 2:
-                sessions[uid] = idx
-        return sessions
-
-    def reset(self):
-        """Sample a random user session, return initial state."""
-        uid         = self.rng.choice(list(self._sessions.keys()))
-        self._rows  = self._sessions[uid]
-        self._ptr   = 0
-        self._done  = False
-        return self._state(self._rows[0])
+    def reset(self) -> np.ndarray:
+        if self.sample_weights is None:
+            self._row_idx = int(self.rng.integers(0, len(self.df)))
+        else:
+            self._row_idx = int(self.rng.choice(len(self.df), p=self.sample_weights))
+        self._done = False
+        return self._state(self._row_idx)
 
     def step(self, action: int):
-        """
-        Returns (next_state, reward, done, info).
-
-        Reward has two components:
-          - emotion_reward : +1/0/-1 from actual pre/post psych ratings
-          - match_bonus    : +0.2 if recommended bucket matches what user listened to
-        """
         if self._done:
             raise RuntimeError("Call reset() before step().")
+        assert 0 <= int(action) < self.ACTION_DIM, f"action must be in [0, {self.ACTION_DIM - 1}]"
 
-        row_idx = self._rows[self._ptr]
-        row     = self.df.iloc[row_idx]
+        row = self.df.iloc[int(self._row_idx)]
+        components = self.reward_model.expected_components(
+            int(row["hmm_state"]),
+            int(row["time_bucket"]),
+            int(row["activity_majority"]),
+            int(action),
+            pre_valence=float(row.get("emo_pre_valence", 0.0)),
+            pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
+            user_valence_pref=float(row.get("user_valence_pref", 0.0)),
+            user_energy_pref=float(row.get("user_energy_pref", 0.0)),
+        )
+        if self.reward_mode == "sample":
+            reward = float(
+                self.reward_model.sample_reward(
+                    int(row["hmm_state"]),
+                    int(row["time_bucket"]),
+                    int(row["activity_majority"]),
+                    int(action),
+                    pre_valence=float(row.get("emo_pre_valence", 0.0)),
+                    pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
+                )
+            )
+        else:
+            reward = float(components["combined_reward"])
+        self._done = True
 
-        gt_action    = int(row["action_bucket"])
-        base_reward  = float(row["reward"])
-        match_bonus  = 0.2 if action == gt_action else 0.0
-        reward       = base_reward + match_bonus
+        info = {
+            "historical_action": int(row.get("action_bucket", -1)),
+            "expected_reward": float(components["combined_reward"]),
+            "emotion_benefit": float(components["emotion_benefit"]),
+            "acceptance": float(components["acceptance"]),
+            "support": float(components["support"]),
+            "positive_prob": self.reward_model.positive_prob(
+                int(row["hmm_state"]),
+                int(row["time_bucket"]),
+                int(row["activity_majority"]),
+                int(action),
+                pre_valence=float(row.get("emo_pre_valence", 0.0)),
+                pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
+            ),
+            "user_id": int(row.get("user_id", -1)),
+            "is_synthetic": bool(row.get("is_synthetic", False)),
+        }
+        return np.zeros(self.STATE_DIM, dtype=np.float32), reward, True, info
 
-        self._ptr += 1
-        done       = self._ptr >= len(self._rows)
-        self._done = done
-
-        next_state = (np.zeros(self.STATE_DIM, dtype=np.float32)
-                      if done else self._state(self._rows[self._ptr]))
-
-        info = {"gt_action": gt_action, "base_reward": base_reward,
-                "user_id": int(row["user_id"])}
-        return next_state, reward, done, info
-
-    def sample_action(self):
+    def sample_action(self) -> int:
         return int(self.rng.integers(0, self.ACTION_DIM))
 
-    # ── State construction ────────────────────────────────────────────────
-
     def _state(self, row_idx: int) -> np.ndarray:
-        """
-        8-dim state: [hmm_belief(6), time_norm, activity_norm]
+        return self.states[row_idx].copy()
 
-        time_norm     = time_bucket / 2.0    (0, 0.5, or 1.0)
-        activity_norm = activity_type / 4.0  (0 to 1.0)
-        """
-        obs_seq  = self.wrist[row_idx]             # shape (30,)
-        belief   = self.hmm.belief_state(obs_seq)  # shape (6,)
-
-        # Recover time and activity from encoded observation (last timestep)
-        # obs = wrist_obs*9 + time*3 + weather
-        last_obs     = int(obs_seq[-1])
-        time_bucket  = (last_obs % 9) // 3          # 0-2
-        wrist_obs    = last_obs // 9                 # 0-19
-        activity     = wrist_obs % 5                 # 0-4
-
-        time_norm     = time_bucket / 2.0
-        activity_norm = activity    / 4.0
-
-        return np.concatenate([belief, [time_norm, activity_norm]]).astype(np.float32)
-
-    # ── Info ──────────────────────────────────────────────────────────────
-
-    @property
-    def n_users(self):
-        return len(self._sessions)
-
-    def __repr__(self):
-        return (f"MusicEnv(users={self.n_users}, "
-                f"interactions={len(self.df)}, "
-                f"state={self.STATE_DIM}, actions={self.ACTION_DIM})")
+    def __repr__(self) -> str:
+        return f"MusicEnv(contexts={len(self.df)}, state={self.STATE_DIM}, actions={self.ACTION_DIM})"

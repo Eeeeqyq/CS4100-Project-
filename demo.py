@@ -1,145 +1,270 @@
 """
-demo.py
-Runs 3 pre-scripted sessions showing the full pipeline:
-    wrist signals → HMM belief → DQN action → music recommendations
-
-Run from project root:
-    python demo.py
-
-Screen-record this output for your presentation video.
+Deterministic presentation demo for the ambient-first music recommendation agent.
 """
 
-import sys
+from __future__ import annotations
+
 import numpy as np
-from pathlib import Path
 
-sys.path.insert(0, ".")
-from src.hmm.hmm_model        import HMM
-from src.rl_agent.dqn_agent    import DQNAgent
-from src.music.music_library   import MusicLibrary, BUCKET_LABELS
+from src.data.common import ACTIVITY_LABELS, ACTIVITY_REMAP, BUCKET_LABELS, STATE_DIM, TIME_LABELS, state_vector_from_components
+from src.hmm.hmm_inference import corrected_belief, encode_obs_seq
+from src.hmm.hmm_model import HMM
+from src.music.music_library import MusicLibrary
+from src.rl_agent.dqn_agent import DQNAgent
+from src.rl_agent.reward_model import HierarchicalRewardModel
 
-MODELS = Path("models")
 
-# ── Wrist encoding (must match clean_situnes exactly) ─────────────────────
-ACTIVITY_REMAP = {0:0, 1:1, 2:2, 3:0, 4:3, 5:4}
-
-def encode_timestep(intensity, activity_type, time_bucket, weather_bucket):
-    ib  = 0 if intensity<10 else (1 if intensity<30 else (2 if intensity<80 else 3))
-    act = ACTIVITY_REMAP.get(int(activity_type), 0)
-    return int((ib*5 + act)*9 + time_bucket*3 + weather_bucket)
-
-def make_obs_seq(intensity, activity_type, time_bucket, weather_bucket, length=30):
-    ts = encode_timestep(intensity, activity_type, time_bucket, weather_bucket)
-    return np.full(length, ts, dtype=np.int32)
-
-# ── Display helpers ────────────────────────────────────────────────────────
-
-def bar(v, w=15):
-    f = int(round(max(0, min(1, v)) * w))
-    return "█"*f + "░"*(w-f)
-
-def print_belief(belief):
-    top = int(np.argmax(belief))
-    for s, p in enumerate(belief):
-        mark = " ◀" if s == top else ""
-        print(f"    S{s} {HMM.STATE_NAMES[s]:<20} {bar(p)} {p*100:5.1f}%{mark}")
-
-def print_tracks(tracks, action):
-    label = BUCKET_LABELS.get(action, "?")
-    print(f"\n  🎵 Bucket {action} — {label.upper()}")
-    if tracks.empty:
-        print("     (no tracks found)")
-        return
-    for _, r in tracks.head(3).iterrows():
-        print(f"     • {r['track_name']}  —  {r['artist']}  [{r['source']}]")
-        print(f"       valence={r['valence']:.2f}  "
-              f"energy={r['energy']:.2f}  "
-              f"tempo={r['tempo']:.0f}bpm")
-
-# ── Demo sessions ──────────────────────────────────────────────────────────
-
-SESSIONS = [
+COMPARISON_GROUPS = [
     {
-        "name":         "Session A — Stressed Student, 11pm",
-        "intensity":    5,       # very low physical activity
-        "activity":     0,       # Still
-        "time_bucket":  2,       # Evening/night
-        "weather":      0,       # Sunny (indoors, doesn't matter)
-        "pre_valence":  -0.4,
-        "pre_arousal":   0.5,
+        "title": "Same Physical State, Different Emotion",
+        "cases": [
+            {
+                "name": "Stressed Afternoon Student",
+                "intensity": 5,
+                "hr_mean": 18.0,
+                "activity_raw": 0,
+                "time_bucket": 1,
+                "weather_bucket": 2,
+                "gps_speed": 0.1,
+                "pre_valence": -0.80,
+                "pre_arousal": -0.60,
+                "pre_emotion_mask": 1.0,
+                "mode": "wind_down",
+                "goal": "Recover a low mood without flattening the listener further.",
+                "user_profile": {
+                    "user_valence_pref": 0.20,
+                    "user_energy_pref": -0.10,
+                    "top_genres": ["ambient", "indie", "piano"],
+                },
+            },
+            {
+                "name": "Balanced Afternoon Student",
+                "intensity": 5,
+                "hr_mean": 18.0,
+                "activity_raw": 0,
+                "time_bucket": 1,
+                "weather_bucket": 2,
+                "gps_speed": 0.1,
+                "pre_valence": 0.00,
+                "pre_arousal": 0.20,
+                "pre_emotion_mask": 1.0,
+                "mode": "focus",
+                "goal": "Maintain balance while staying gently focused.",
+                "user_profile": {
+                    "user_valence_pref": 0.20,
+                    "user_energy_pref": -0.10,
+                    "top_genres": ["indie", "classical", "acoustic"],
+                },
+            },
+        ],
     },
     {
-        "name":         "Session B — Morning Run, 7am",
-        "intensity":    120,     # vigorous
-        "activity":     5,       # Running
-        "time_bucket":  0,       # Morning
-        "weather":      0,       # Sunny
-        "pre_valence":   0.3,
-        "pre_arousal":   0.6,
+        "title": "Same Context, Different Preference",
+        "cases": [
+            {
+                "name": "Prefers Dark / High-Energy Music",
+                "intensity": 5,
+                "hr_mean": 18.0,
+                "activity_raw": 0,
+                "time_bucket": 1,
+                "weather_bucket": 2,
+                "gps_speed": 0.1,
+                "pre_valence": 0.20,
+                "pre_arousal": 0.00,
+                "pre_emotion_mask": 1.0,
+                "mode": "uplift",
+                "goal": "Stay emotionally steady, but honor a darker personal taste.",
+                "user_profile": {
+                    "user_valence_pref": -0.80,
+                    "user_energy_pref": -0.50,
+                    "top_genres": ["rock", "hip-hop", "electro"],
+                },
+            },
+            {
+                "name": "Prefers Calm / Bright Music",
+                "intensity": 5,
+                "hr_mean": 18.0,
+                "activity_raw": 0,
+                "time_bucket": 1,
+                "weather_bucket": 2,
+                "gps_speed": 0.1,
+                "pre_valence": 0.20,
+                "pre_arousal": 0.00,
+                "pre_emotion_mask": 1.0,
+                "mode": "uplift",
+                "goal": "Stay emotionally steady with a brighter, calmer taste profile.",
+                "user_profile": {
+                    "user_valence_pref": 0.20,
+                    "user_energy_pref": -0.10,
+                    "top_genres": ["indie", "folk", "acoustic"],
+                },
+            },
+        ],
     },
     {
-        "name":         "Session C — Afternoon Study, 2pm",
-        "intensity":    8,       # minimal
-        "activity":     0,       # Still
-        "time_bucket":  1,       # Afternoon
-        "weather":      1,       # Cloudy
-        "pre_valence":   0.1,
-        "pre_arousal":  -0.1,
+        "title": "Same User, Different Scenarios",
+        "cases": [
+            {
+                "name": "Deep Focus Block",
+                "intensity": 6,
+                "hr_mean": 6.0,
+                "activity_raw": 0,
+                "time_bucket": 1,
+                "weather_bucket": 1,
+                "gps_speed": 0.0,
+                "pre_valence": -0.05,
+                "pre_arousal": 0.10,
+                "pre_emotion_mask": 1.0,
+                "mode": "focus",
+                "goal": "Support sustained concentration.",
+                "user_profile": {
+                    "user_valence_pref": 0.15,
+                    "user_energy_pref": -0.15,
+                    "top_genres": ["indie", "ambient", "classical"],
+                },
+            },
+            {
+                "name": "Evening Recovery",
+                "intensity": 4,
+                "hr_mean": 2.0,
+                "activity_raw": 4,
+                "time_bucket": 2,
+                "weather_bucket": 1,
+                "gps_speed": 0.0,
+                "pre_valence": -0.20,
+                "pre_arousal": -0.10,
+                "pre_emotion_mask": 1.0,
+                "mode": "wind_down",
+                "goal": "Relax and recover without overstimulation.",
+                "user_profile": {
+                    "user_valence_pref": 0.15,
+                    "user_energy_pref": -0.15,
+                    "top_genres": ["indie", "ambient", "classical"],
+                },
+            },
+            {
+                "name": "Commute Walk",
+                "intensity": 16,
+                "hr_mean": 10.0,
+                "activity_raw": 2,
+                "time_bucket": 0,
+                "weather_bucket": 0,
+                "gps_speed": 2.3,
+                "pre_valence": 0.00,
+                "pre_arousal": 0.20,
+                "pre_emotion_mask": 1.0,
+                "mode": "uplift",
+                "goal": "Add light energy and positive momentum.",
+                "user_profile": {
+                    "user_valence_pref": 0.15,
+                    "user_energy_pref": -0.15,
+                    "top_genres": ["indie", "ambient", "classical"],
+                },
+            },
+        ],
     },
 ]
 
 
-def main():
-    print("=" * 60)
-    print("  AMBIENT MUSIC RECOMMENDATION AGENT — DEMO")
-    print("  HMM + Deep Q-Network  |  SiTunes Dataset")
-    print("=" * 60)
+def bar(value: float, width: int = 18) -> str:
+    filled = int(round(max(0.0, min(1.0, value)) * width))
+    return "#" * filled + "." * (width - filled)
 
-    # Load models
-    hmm   = HMM.load(str(MODELS / "hmm.npz"))
-    agent = DQNAgent(state_dim=8, action_dim=8)
-    pt    = MODELS / "agent.pt"
-    if pt.exists():
-        agent.load(str(pt))
-        agent.epsilon = 0.0   # no exploration at demo time
-    else:
-        print("WARNING: agent.pt not found — using untrained agent")
 
-    # Load music
-    print("\nLoading music library...")
-    lib = MusicLibrary.build()
+def recommend_case(hmm, agent, reward_model, library, case: dict) -> tuple[np.ndarray, int, dict, np.ndarray]:
+    activity_remapped = ACTIVITY_REMAP[case["activity_raw"]]
+    obs_seq = encode_obs_seq(case["intensity"], case["activity_raw"], hr_mean=case["hr_mean"])
+    belief = corrected_belief(hmm, obs_seq, activity_remapped)
+    state = state_vector_from_components(
+        belief,
+        case["time_bucket"],
+        activity_remapped,
+        weather_bucket=case["weather_bucket"],
+        gps_speed=case["gps_speed"],
+        hr_mean_rel_user=case["hr_mean"],
+        hr_std=6.0,
+        pre_valence=case["pre_valence"],
+        pre_arousal=case["pre_arousal"],
+        pre_emotion_mask=case["pre_emotion_mask"],
+        user_valence_pref=case["user_profile"]["user_valence_pref"],
+        user_energy_pref=case["user_profile"]["user_energy_pref"],
+    )
+    action = int(agent.greedy_action(state))
+    components = reward_model.expected_components(
+        int(np.argmax(belief)),
+        int(case["time_bucket"]),
+        int(activity_remapped),
+        action,
+        pre_valence=float(case["pre_valence"]),
+        pre_arousal=float(case["pre_arousal"]),
+        user_valence_pref=float(case["user_profile"]["user_valence_pref"]),
+        user_energy_pref=float(case["user_profile"]["user_energy_pref"]),
+    )
+    tracks = library.get_tracks(action, n=3, context={"mode": case["mode"], "user_profile": case["user_profile"]})
+    return belief, action, components, tracks
 
-    # Run sessions
-    for s in SESSIONS:
-        print(f"\n{'─'*60}")
-        print(f"  {s['name']}")
-        print(f"{'─'*60}")
 
-        obs_seq = make_obs_seq(s["intensity"], s["activity"],
-                               s["time_bucket"], s["weather"])
+def main() -> None:
+    hmm = HMM.load("models/hmm.npz")
+    reward_model = HierarchicalRewardModel.load("models/reward_model.json")
+    agent = DQNAgent(state_dim=STATE_DIM, action_dim=8, hidden=128)
+    agent.load("models/agent.pt")
+    agent.epsilon = 0.0
+    library = MusicLibrary.build()
 
-        belief    = hmm.belief_state(obs_seq)
-        top_state = int(np.argmax(belief))
+    print("=" * 92)
+    print("AMBIENT-FIRST PERSONALIZED MUSIC INTERVENTION DEMO")
+    print("=" * 92)
+    print("Pipeline: biometrics + context + optional check-in + taste profile -> HMM belief -> DQN bucket -> ranked tracks")
 
-        print(f"\n  Signals: intensity={s['intensity']}  "
-              f"activity={'Still Running Walking'.split()[min(s['activity'],2)]}  "
-              f"time={['Morning','Afternoon','Evening'][s['time_bucket']]}")
-        print(f"\n  HMM Belief State:")
-        print_belief(belief)
-        print(f"\n  → Inferred mood: {HMM.STATE_NAMES[top_state].upper()}")
+    for group in COMPARISON_GROUPS:
+        print("\n" + "=" * 92)
+        print(group["title"])
+        print("=" * 92)
+        for case in group["cases"]:
+            belief, action, components, tracks = recommend_case(hmm, agent, reward_model, library, case)
+            activity_remapped = ACTIVITY_REMAP[case["activity_raw"]]
 
-        # Build state vector for DQN
-        time_norm = s["time_bucket"] / 2.0
-        act_norm  = ACTIVITY_REMAP.get(s["activity"], 0) / 4.0
-        state_vec = np.concatenate([belief, [time_norm, act_norm]]).astype(np.float32)
+            print("\n" + "-" * 92)
+            print(case["name"])
+            print("-" * 92)
+            print(
+                f"Context: hr={case['hr_mean']:<5.1f} intensity={case['intensity']:<4} "
+                f"activity={ACTIVITY_LABELS[activity_remapped]:<13} "
+                f"time={TIME_LABELS[case['time_bucket']]:<9} weather={case['weather_bucket']} speed={case['gps_speed']:.1f}"
+            )
+            print(
+                f"Mood:    pre_valence={case['pre_valence']:+.2f} "
+                f"pre_arousal={case['pre_arousal']:+.2f} "
+                f"mask={case['pre_emotion_mask']:.0f}"
+            )
+            print(
+                f"Taste:   valence_pref={case['user_profile']['user_valence_pref']:+.2f} "
+                f"energy_pref={case['user_profile']['user_energy_pref']:+.2f} "
+                f"genres={', '.join(case['user_profile']['top_genres'])}"
+            )
+            print(f"Goal:    {case['goal']}")
+            print("Belief:")
+            for idx, prob in enumerate(belief):
+                marker = " <" if idx == int(np.argmax(belief)) else ""
+                print(f"  S{idx} {hmm.metadata.get('state_names', hmm.STATE_NAMES)[idx]:<12} {bar(float(prob))} {prob:>5.1%}{marker}")
+            print(
+                f"Action:  bucket {action} ({BUCKET_LABELS[action]}) | "
+                f"combined={components['combined_reward']:+.3f} "
+                f"emotion={components['emotion_benefit']:+.3f} "
+                f"accept={components['acceptance']:+.3f}"
+            )
+            print("Tracks:")
+            for _, track in tracks.iterrows():
+                soft_tag = " soft" if bool(track["bucket_is_soft"]) else ""
+                print(
+                    f"  - {track['track_name']} / {track['artist']} "
+                    f"[{track['source']}{soft_tag}, score={track['score']:.2f}]"
+                )
 
-        action = agent.greedy_action(state_vec)
-        tracks = lib.get_tracks(bucket=action, n=5)
-        print_tracks(tracks, action)
-
-    print(f"\n{'='*60}")
-    print("  Record this output for your presentation video.")
-    print(f"{'='*60}")
+    print("\n" + "=" * 92)
+    print("Use this output directly for presentation capture.")
+    print("=" * 92)
 
 
 if __name__ == "__main__":

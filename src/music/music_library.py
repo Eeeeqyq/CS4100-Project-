@@ -1,138 +1,252 @@
 """
-src/music/music_library.py
-Loads all cleaned music sources and maps action_bucket → tracks.
-
-Auto-detects which sources are available in data/processed/.
-Works with just SiTunes alone; PMEmo and Spotify add more variety.
+Deterministic, preference-aware music retrieval on top of the cleaned catalogs.
 """
 
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
+import json
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 
-BUCKET_LABELS = {
-    0: "dark-slow",      # low valence, low energy, slow
-    1: "dark-fast",      # low valence, low energy, fast
-    2: "intense-slow",   # low valence, high energy, slow
-    3: "aggressive",     # low valence, high energy, fast
-    4: "chill-study",    # med valence, low energy, slow
-    5: "indie",          # med valence, low energy, fast
-    6: "soulful",        # med valence, high energy, slow
-    7: "energetic",      # med valence, high energy, fast
+from src.data.common import BUCKET_LABELS, PROCESSED_DIR, bucket_targets, track_quality_features
+
+
+MODE_GENRE_BOOSTS = {
+    "focus": ["ambient", "classical", "study", "piano", "acoustic", "chill", "indie", "lofi"],
+    "wind_down": ["ambient", "acoustic", "singer-songwriter", "folk", "classical", "lofi", "jazz"],
+    "exercise": ["dance", "edm", "electro", "house", "hip-hop", "rock", "pop", "workout"],
+    "exercise-lite": ["dance", "indie", "rock", "pop", "electro"],
+    "uplift": ["soul", "funk", "disco", "indie", "pop"],
 }
 
 
 class MusicLibrary:
-
-    def __init__(self, df: pd.DataFrame):
-        self.df      = df.reset_index(drop=True)
-        self._index  = {b: df[df["action_bucket"] == b].index.tolist()
-                        for b in range(8)}
+    def __init__(self, df: pd.DataFrame, user_profiles: dict[str, dict] | None = None):
+        self.df = track_quality_features(df.reset_index(drop=True))
+        self.df["bucket_label"] = self.df["action_bucket"].map(BUCKET_LABELS).fillna("soft-match")
+        self.user_profiles = user_profiles or {}
 
     @classmethod
-    def build(cls, processed_dir="data/processed"):
-        """
-        Load all available music CSVs from data/processed/.
-        Each source is optional except SiTunes.
-        """
-        p      = Path(processed_dir)
+    def build(cls, processed_dir: str | Path = PROCESSED_DIR):
+        processed = Path(processed_dir)
         frames = []
 
-        # SiTunes — required
-        path = p / "music_situnes_clean.csv"
-        if path.exists():
-            df = pd.read_csv(path)
-            frames.append(pd.DataFrame({
-                "track_name":    df["music"],
-                "artist":        df["singer"],
-                "valence":       df["valence"],
-                "energy":        df["energy"],
-                "tempo":         df["tempo"],
-                "action_bucket": df["action_bucket"].astype(int),
-                "source":        "situnes",
-                "popularity":    df.get("popularity",
-                                  pd.Series([50.0]*len(df))).fillna(50),
-            }))
-            print(f"  SiTunes:  {len(frames[-1]):>6} tracks")
-        else:
-            raise FileNotFoundError(
-                "music_situnes_clean.csv not found. Run cleaning first.")
+        situnes_path = processed / "music_situnes_clean.csv"
+        if not situnes_path.exists():
+            raise FileNotFoundError("music_situnes_clean.csv not found. Run preprocessing first.")
+        situnes = pd.read_csv(situnes_path)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "track_name": situnes["music"],
+                    "artist": situnes["singer"],
+                    "genre": situnes.get("general_genre", ""),
+                    "valence": situnes["valence"],
+                    "energy": situnes["energy"],
+                    "tempo": situnes["tempo"],
+                    "danceability": situnes.get("danceability", 0.5),
+                    "speechiness": situnes.get("speechiness", 0.08),
+                    "acousticness": situnes.get("acousticness", 0.5),
+                    "instrumentalness": situnes.get("instrumentalness", 0.0),
+                    "popularity": situnes.get("popularity", 45.0),
+                    "action_bucket": situnes["action_bucket"].astype(int),
+                    "bucket_hint": situnes.get("bucket_hint", situnes["action_bucket"]).astype(int),
+                    "bucket_is_soft": situnes.get("bucket_is_soft", False),
+                    "eda_impact": situnes.get("eda_impact", 0.0),
+                    "source": "situnes",
+                    "explicit": False,
+                }
+            )
+        )
 
-        # PMEmo — optional
-        path = p / "music_pmemo_clean.csv"
-        if path.exists():
-            df = pd.read_csv(path)
-            frames.append(pd.DataFrame({
-                "track_name":    df.get("title",
-                                  pd.Series(["Unknown"]*len(df))),
-                "artist":        df.get("artist",
-                                  pd.Series(["Unknown"]*len(df))),
-                "valence":       df["valence_01"],
-                "energy":        df.get("energy",
-                                  pd.Series([0.5]*len(df))),
-                "tempo":         df.get("tempo",
-                                  pd.Series([120.0]*len(df))),
-                "action_bucket": df["action_bucket"].astype(int),
-                "source":        "pmemo",
-                "popularity":    pd.Series([50.0]*len(df)),
-            }))
-            print(f"  PMEmo:    {len(frames[-1]):>6} tracks")
+        pmemo_path = processed / "music_pmemo_clean.csv"
+        if pmemo_path.exists():
+            pmemo = pd.read_csv(pmemo_path)
+            frames.append(
+                pd.DataFrame(
+                    {
+                        "track_name": pmemo.get("title", pd.Series(["Unknown"] * len(pmemo))),
+                        "artist": pmemo.get("artist", pd.Series(["Unknown"] * len(pmemo))),
+                        "genre": "",
+                        "valence": pmemo["valence_01"],
+                        "energy": pmemo["energy"],
+                        "tempo": pmemo["tempo"],
+                        "danceability": 0.45,
+                        "speechiness": 0.05,
+                        "acousticness": 0.55,
+                        "instrumentalness": 0.25,
+                        "popularity": 35.0,
+                        "action_bucket": pmemo["action_bucket"].astype(int),
+                        "bucket_hint": pmemo.get("bucket_hint", pmemo["action_bucket"]).astype(int),
+                        "bucket_is_soft": pmemo.get("bucket_is_soft", True),
+                        "eda_impact": pmemo.get("eda_impact", 0.0),
+                        "source": "pmemo",
+                        "explicit": False,
+                    }
+                )
+            )
 
-        # Spotify — optional
-        path = p / "music_spotify_clean.csv"
-        if path.exists():
-            df = pd.read_csv(path)
-            frames.append(pd.DataFrame({
-                "track_name":    df["track_name"],
-                "artist":        df["artists"],
-                "valence":       df["valence"],
-                "energy":        df["energy"],
-                "tempo":         df["tempo"],
-                "action_bucket": df["action_bucket"].astype(int),
-                "source":        "spotify",
-                "popularity":    df["popularity"].fillna(50),
-            }))
-            print(f"  Spotify:  {len(frames[-1]):>6} tracks")
+        spotify_path = processed / "music_spotify_clean.csv"
+        if spotify_path.exists():
+            spotify = pd.read_csv(spotify_path)
+            frames.append(
+                pd.DataFrame(
+                    {
+                        "track_name": spotify["track_name"],
+                        "artist": spotify["artists"],
+                        "genre": spotify.get("genre", spotify.get("track_genre", "")),
+                        "valence": spotify["valence"],
+                        "energy": spotify["energy"],
+                        "tempo": spotify["tempo"],
+                        "danceability": spotify.get("danceability", 0.5),
+                        "speechiness": spotify.get("speechiness", 0.08),
+                        "acousticness": spotify.get("acousticness", 0.5),
+                        "instrumentalness": spotify.get("instrumentalness", 0.0),
+                        "popularity": spotify.get("popularity", 50.0),
+                        "action_bucket": spotify["action_bucket"].astype(int),
+                        "bucket_hint": spotify.get("bucket_hint", spotify["action_bucket"]).astype(int),
+                        "bucket_is_soft": spotify.get("bucket_is_soft", False),
+                        "eda_impact": spotify.get("eda_impact", 0.0),
+                        "source": "spotify",
+                        "explicit": spotify.get("explicit", False),
+                    }
+                )
+            )
 
         combined = pd.concat(frames, ignore_index=True)
-        print(f"  Total:    {len(combined):>6} tracks")
-        return cls(combined)
+        user_profiles = {}
+        pref_path = processed / "user_preferences.json"
+        if pref_path.exists():
+            user_profiles = json.loads(pref_path.read_text(encoding="utf-8"))
+        return cls(combined, user_profiles=user_profiles)
 
-    # ── Retrieval ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _mode_for_bucket(bucket: int, context: dict | str | None = None) -> str:
+        if isinstance(context, str) and context:
+            return context
+        if isinstance(context, dict) and context.get("mode"):
+            return str(context["mode"])
+        if bucket in {0, 1}:
+            return "wind_down"
+        if bucket in {4, 5, 6}:
+            return "focus"
+        if bucket in {3, 7}:
+            return "exercise"
+        return "uplift"
 
-    def get_tracks(self, bucket: int, n=5,
-                   exclude_ids=None, prefer_popular=True):
-        """
-        Return up to n tracks from the given bucket.
+    @staticmethod
+    def _genre_bonus(genre: str, mode: str) -> float:
+        text = str(genre).lower()
+        return sum(0.10 for keyword in MODE_GENRE_BOOSTS.get(mode, []) if keyword in text)
 
-        Parameters
-        ----------
-        bucket        : int 0-7
-        n             : how many tracks to return
-        exclude_ids   : list of row indices to skip (recently played)
-        prefer_popular: sort by popularity before sampling
-        """
-        idx  = self._index.get(bucket, [])
-        pool = self.df.loc[idx].copy()
+    def _resolve_user_profile(self, context: dict | None) -> dict:
+        if context is None:
+            return {}
+        if context.get("user_profile"):
+            return dict(context["user_profile"])
+        user_id = context.get("user_id")
+        if user_id is None:
+            return {}
+        return dict(self.user_profiles.get(str(int(user_id)), {}))
 
+    @staticmethod
+    def _genre_preference_bonus(genre: str, profile: dict) -> float:
+        text = str(genre).lower()
+        return sum(0.12 for keyword in profile.get("top_genres", []) if keyword.lower() in text)
+
+    def _score_tracks(self, bucket: int, mode: str, context: dict | None = None) -> pd.Series:
+        target = bucket_targets(bucket)
+        user_profile = self._resolve_user_profile(context or {})
+        pool = self.df.copy()
+
+        valence_fit = 1.0 - np.abs(pool["valence"] - target["valence"]) / 0.7
+        energy_fit = 1.0 - np.abs(pool["energy"] - target["energy"]) / 0.7
+        tempo_fit = 1.0 - np.abs(pool["tempo"] - target["tempo"]) / 90.0
+        score = 1.8 * valence_fit + 2.0 * energy_fit + 1.4 * tempo_fit
+
+        hard_match = (pool["action_bucket"] == bucket) & (~pool["bucket_is_soft"])
+        soft_match = (pool["bucket_hint"] == bucket) & (pool["bucket_is_soft"])
+        score += hard_match.astype(float) * 0.90
+        score += soft_match.astype(float) * 0.20
+
+        if mode == "focus":
+            score += 0.9 * pool["instrumentalness"] + 0.6 * pool["acousticness"]
+            score -= 1.0 * pool["speechiness"] + 0.2 * pool["explicit"].astype(float)
+        elif mode == "wind_down":
+            score += 0.8 * pool["acousticness"] + 0.7 * pool["instrumentalness"]
+            score -= 0.8 * pool["speechiness"] + 0.4 * pool["energy"]
+        elif mode in {"exercise", "exercise-lite"}:
+            score += 0.9 * pool["danceability"] + 0.3 * pool["popularity"] / 100.0
+            score -= 0.3 * pool["acousticness"]
+        else:
+            score += 0.3 * pool["popularity"] / 100.0
+
+        if user_profile:
+            val_pref = float(user_profile.get("user_valence_pref", 0.0))
+            energy_pref = float(user_profile.get("user_energy_pref", 0.0))
+            pref_val_target = np.clip(0.5 + 0.25 * val_pref, 0.0, 1.0)
+            pref_energy_target = np.clip(0.5 + 0.25 * energy_pref, 0.0, 1.0)
+            score += 0.45 * (1.0 - np.abs(pool["valence"] - pref_val_target))
+            score += 0.55 * (1.0 - np.abs(pool["energy"] - pref_energy_target))
+
+            acoustic_pref = float(user_profile.get("preferred_acousticness", 0.5))
+            instrumental_pref = float(user_profile.get("preferred_instrumentalness", 0.1))
+            popularity_tolerance = float(user_profile.get("popularity_tolerance", 0.5))
+            score += 0.25 * (1.0 - np.abs(pool["acousticness"] - acoustic_pref))
+            score += 0.20 * (1.0 - np.abs(pool["instrumentalness"] - instrumental_pref))
+            score += 0.18 * (1.0 - np.abs(pool["popularity"] / 100.0 - popularity_tolerance))
+            score += pool["genre"].map(lambda text: self._genre_preference_bonus(text, user_profile))
+
+        score += pool["genre"].map(lambda text: self._genre_bonus(text, mode))
+        score += 0.18 * pool["eda_impact"]
+        score += pool["source"].map({"situnes": 0.10, "pmemo": 0.04, "spotify": 0.0}).fillna(0.0)
+        return score
+
+    def get_tracks(
+        self,
+        bucket: int,
+        n: int = 5,
+        context: dict | str | None = None,
+        exclude_ids: list[int] | None = None,
+    ) -> pd.DataFrame:
+        mode = self._mode_for_bucket(bucket, context=context)
+        pool = self.df.copy()
         if exclude_ids:
-            pool = pool[~pool.index.isin(exclude_ids)]
+            pool = pool[~pool.index.isin(exclude_ids)].copy()
         if pool.empty:
             return pd.DataFrame()
 
-        if prefer_popular:
-            pool   = pool.sort_values("popularity", ascending=False)
-            pool   = pool.head(min(50, len(pool)))
+        score = self._score_tracks(bucket, mode, context=context if isinstance(context, dict) else {"mode": mode})
+        pool = pool.assign(score=score.loc[pool.index].to_numpy())
+        pool = pool.sort_values(
+            ["score", "popularity", "track_name", "artist"],
+            ascending=[False, False, True, True],
+            kind="mergesort",
+        )
+        return pool.head(n)[
+            [
+                "track_name",
+                "artist",
+                "genre",
+                "valence",
+                "energy",
+                "tempo",
+                "action_bucket",
+                "bucket_hint",
+                "bucket_is_soft",
+                "source",
+                "popularity",
+                "eda_impact",
+                "score",
+            ]
+        ].reset_index(drop=True)
 
-        result = pool.sample(min(n, len(pool)))
-        return result[["track_name", "artist", "valence", "energy",
-                        "tempo", "action_bucket", "source", "popularity"]]
+    def bucket_size(self, bucket: int) -> int:
+        return int((self.df["action_bucket"] == bucket).sum())
 
-    def bucket_size(self, bucket):
-        return len(self._index.get(bucket, []))
-
-    def describe(self):
-        print(f"MusicLibrary — {len(self.df)} tracks")
-        for b, label in BUCKET_LABELS.items():
-            print(f"  {b} {label:<15}: {self.bucket_size(b)}")
+    def describe(self) -> None:
+        print(f"MusicLibrary - {len(self.df)} tracks")
+        for bucket, label in BUCKET_LABELS.items():
+            print(f"  {bucket} {label:<15}: {self.bucket_size(bucket)}")
