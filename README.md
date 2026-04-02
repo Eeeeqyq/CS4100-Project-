@@ -94,7 +94,7 @@ These are intentionally coarse. The system does **not** claim that wrist data al
 
 | Dataset | Role | Size |
 |---------|------|------|
-| [SiTunes](https://github.com/JiayuLi-997/SiTunes_dataset) | Core training data: biometrics, context, pre/post emotion labels, user preference survey | 2,006 interactions, 30 users |
+| [SiTunes](https://github.com/JiayuLi-997/SiTunes_dataset) | Core training data: biometrics, context, pre/post emotion labels, user preference survey | ~2,000 raw → 1,406 cleaned interactions, 30 users |
 | [PMEmo](https://github.com/HuiZhangDB/PMEmo) | Music-affect support for retrieval, plus EDA impact signal | 736 labeled tracks |
 | [Spotify Kaggle](https://www.kaggle.com/datasets/maharshipandya/-spotify-tracks-dataset) | Large retrieval catalog | ~89,500 tracks |
 
@@ -416,29 +416,37 @@ PMEmo helps retrieval and music-affect scoring, but in this project it is not re
 
 ## Results
 
-Current end-to-end rebuild results on the local processed split:
+Current end-to-end results on the held-out test set (5 users, 311 interactions):
 
-| Metric | Value |
-|--------|-------|
-| HMM states used on test | 3 / 3 |
+| Metric | DQN | State-Prior | Always-7 | Random |
+|--------|-----|-------------|----------|--------|
+| Combined reward | **+0.1630** | +0.1645 | +0.0805 | +0.0778 |
+| Emotion benefit | +0.0473 | +0.0438 | +0.0083 | — |
+| Acceptance | +0.4329 | +0.4462 | +0.2490 | — |
+| Regret (vs oracle) | 0.004 | 0.002 | 0.086 | — |
+
+| HMM Metric | Value |
+|------------|-------|
+| States used on test | 3 / 3 |
 | Mean belief entropy | 0.159 |
-| Rounded unique belief vectors | 473 |
-| DQN held-out combined reward | +0.1630 |
-| State-prior combined reward | +0.1645 |
-| Always-7 combined reward | +0.0805 |
-| Random uniform expected reward | +0.0778 |
+| Unique belief vectors | 473 |
+
+**DQN action distribution (test):** bucket 5 (indie) 89%, bucket 2 (intense-slow) 6%, bucket 6 (soulful) 4%, bucket 7 (energetic) 1%. The concentration on bucket 5 is rational — 94% of sessions are sedentary afternoon contexts where indie-tempo music has the highest expected reward. The DQN differentiates when emotion or preference inputs differ (visible in demo scenarios).
 
 What these numbers mean:
 
-- the rebuilt system clearly beats trivial baselines
-- the HMM no longer fully collapses to one state
-- the demos now show cases where **the same physical state but different emotions** lead to different bucket recommendations
-- Stage 1 preference profiles now affect both acceptance modeling and final song ranking
+- The system clearly beats trivial baselines (2x over always-7 and random)
+- Near-zero regret (0.004) means the DQN is near-optimal given the reward model
+- The two-part reward shows the system optimizes both emotional improvement and user acceptance
+- The HMM uses all 3 states without collapsing
+- The demos show cases where **the same physical state but different emotions** lead to different bucket recommendations
+- Stage 1 preference profiles affect both acceptance modeling and final song ranking
 
-The strongest presentation result is qualitative:
+The strongest presentation results are qualitative:
 
-- same physical state + different mood -> different bucket
-- same context + different taste profile -> different bucket / different tracks
+- Same physical state + different mood → different bucket (stressed → intense-slow, balanced → indie)
+- Same context + different taste profile → different bucket and different tracks
+- Same user + different scenario → different belief state and bucket selection
 
 ---
 
