@@ -1,540 +1,163 @@
-# CS4100-Project-
+# Ambient Music Mood Prediction
 
-# Ambient Music Recommendation Agent
-### CS4100 Artificial Intelligence - Northeastern University
+**CS4100 Artificial Intelligence — Northeastern University**
 
-An AI system that recommends music based on the user's current biometrics, emotional state, and environment instead of only past listening history. A Hidden Markov Model (HMM) infers a coarse latent context-energy belief state from wrist sensor data, and a Deep Q-Network (DQN) chooses the music bucket most likely to help in the current situation. A deterministic retrieval layer then ranks concrete songs using the user's baseline preferences.
+Given a user's physiological signals, environmental context, and emotional state, can we predict what kind of music they'll listen to? This project uses a two-stage pipeline — an unsupervised Hidden Markov Model for latent physiological state discovery, followed by a supervised feedforward neural network for mood bucket classification — to investigate whether wrist-sensor data and situational context carry predictive signal for music preference.
 
-This project is intentionally built with from-scratch NumPy and PyTorch implementations for the core AI components. It does not use `hmmlearn`, `stable-baselines3`, or transformer-based models.
+## Why Prediction Instead of Reinforcement Learning
 
----
+The original project concept framed this as an RL problem: an agent recommends music and learns from user feedback over time. We pivoted away from RL for a structural reason. RL requires episodes with sequential decisions, temporal credit assignment, and terminal states. Music listening doesn't have this structure — a single recommendation is a one-shot context→action mapping, not a multi-step decision process where early actions affect later outcomes. An initial DQN implementation confirmed this concern: it performed slightly *worse* than a simple lookup table (combined reward 0.163 vs. 0.165), indicating that the RL machinery was solving a problem that didn't exist in the data.
 
-## The Problem
-
-Spotify and Apple Music know what you liked last week. They do not know that you are tense at 2pm, low-energy in the evening, or trying to stay focused during a study block. Most recommenders ignore the most relevant signal: how you feel right now.
-
-This project asks a harder question:
-
-**Given your current biometric signals, current environment, and baseline taste profile, what kind of music is most likely to help right now?**
-
----
-
-## Our Solution
-
-A four-part ambient recommendation pipeline:
-
-1. **Sense the current situation**  
-   A 3-state HMM reads a 30-step wrist window and produces a belief distribution over coarse latent context-energy states.
-
-2. **Remember the person**  
-   Stage 1 of SiTunes is used to build a compact user preference profile from baseline ratings.
-
-3. **Choose the right intervention**  
-   A Double DQN receives a 14-dimensional state vector and chooses one of 8 music mood buckets.
-
-4. **Retrieve real tracks**  
-   A deterministic music library ranks concrete songs from SiTunes, Spotify, and PMEmo using bucket fit, scenario fit, and user preference fit.
-
-The key idea is still POMDP-style: the user's internal state is partially hidden, so the system reasons over a belief state rather than pretending wrist data directly reveals mood.
-
----
+Supervised classification is the honest framing: given your current situation, predict which category of music fits. The HMM provides the latent state modeling that makes the problem interesting, and the neural network handles the prediction. Both are core course topics (probabilistic graphical models, gradient descent, backpropagation) applied to a problem they actually fit.
 
 ## Architecture
 
-```text
-Biometrics + Context + Optional Check-In
- [HR, intensity, activity, weather, speed, pre-emotion]
-                      |
-                      v
-    +----------------------------------+
-    | HMM (3 states, 60 observations)  |
-    | Baum-Welch + corrected belief     |
-    +----------------+------------------+
-                     |
-                     | belief state (3-dim)
-                     v
-    +----------------------------------+
-    | DQN Agent (14D state, 8 actions) |
-    | Double DQN + replay + target net |
-    +----------------+------------------+
-                     |
-                     | music bucket
-                     v
-    +----------------------------------+
-    | Retrieval / Ranking Layer        |
-    | preference-aware deterministic   |
-    | ranking across 3 music catalogs  |
-    +----------------------------------+
+```
+Wrist Sensor Data (30 timesteps × 4 channels)
+    │
+    ▼
+┌──────────────────────────────┐
+│  Observation Discretization  │
+│  HR (3 bins) × Intensity     │
+│  (3 bins) × Activity (3 cat) │
+│  = 27 possible observations  │
+└──────────┬───────────────────┘
+           │ 30-step discrete sequences
+           ▼
+┌──────────────────────────────┐
+│  HMM (3 states, 27 obs)     │
+│  Baum-Welch (unsupervised)   │
+│  → 3D belief distribution    │
+└──────────┬───────────────────┘
+           │ P(state=0), P(state=1), P(state=2)
+           ▼
+┌──────────────────────────────────────────────┐
+│  Feature Vector (~14–21 dimensions)          │
+│  HMM beliefs + time + weather + temperature  │
+│  + humidity + speed + HR stats + activity     │
+│  + pre-emotion valence/arousal + mask         │
+└──────────┬───────────────────────────────────┘
+           │
+           ▼
+┌──────────────────────────────┐
+│  Feedforward Neural Network  │
+│  21 → 64 → 32 → 4           │
+│  ReLU + Dropout(0.3)         │
+│  CrossEntropyLoss + Adam     │
+└──────────┬───────────────────┘
+           │
+           ▼
+    Mood Bucket Prediction
+    (4 classes from track valence × energy)
 ```
 
-**Hidden States (HMM)**
-
-| ID | State | Interpretation |
-|----|-------|----------------|
-| 0 | low-energy | sedentary / recovery / lying-still contexts |
-| 1 | moderate | transitioning / walking / mixed activity contexts |
-| 2 | high-energy | high-intensity / running-like contexts |
-
-These states are intentionally coarse. The system does not claim that wrist data alone can recover detailed psychological moods.
-
-**Action Buckets (DQN)**
+## Dataset
 
-| Bucket | Label | Valence | Energy | Tempo |
-|--------|-------|---------|--------|-------|
-| 0 | dark-slow | low | low | slow |
-| 1 | dark-fast | low | low | fast |
-| 2 | intense-slow | low | high | slow |
-| 3 | aggressive | low | high | fast |
-| 4 | chill-study | medium/high | low | slow |
-| 5 | indie | medium/high | low | fast |
-| 6 | soulful | medium/high | high | slow |
-| 7 | energetic | medium/high | high | fast |
+All data comes from **SiTunes** (Li et al., CHIIR 2024), a situational music recommendation dataset collected via a three-stage field study with smart wristbands.
 
----
+| Component | Source | Shape | Content |
+|-----------|--------|-------|---------|
+| Interactions | Stage2/interactions.csv | 897 × 11 | user, track, rating, pre/post emotion V/A |
+| Wrist physio | Stage2/wrist.npy | 897 × 30 × 4 | heart rate, activity intensity, steps, activity type |
+| Environment | Stage2/env.json | 897 records | time period, weather, temperature, humidity, GPS, speed |
+| Track metadata | music_metadata/ | 936 tracks | Spotify audio features (valence, energy, genre, etc.) |
 
-## Datasets
+Heart rate values are normalized per user (deviation from personal baseline). Activity types include still, lying, walking, running, and transitional states. The dataset is heavily sedentary: 86% of timesteps are still or lying, with only 15% walking and <1% running.
 
-| Dataset | Role | Size |
-|---------|------|------|
-| [SiTunes](https://github.com/JiayuLi-997/SiTunes_dataset) | Core training data: biometrics, context, pre/post emotion labels, and baseline preference survey | ~2,000 raw interactions -> 1,406 cleaned Stage 2/3 interactions, 30 users |
-| [PMEmo](https://github.com/HuiZhangDB/PMEmo) | Retrieval-side music-affect support and optional EDA impact signal | 736 labeled tracks |
-| [Spotify Kaggle](https://www.kaggle.com/datasets/maharshipandya/-spotify-tracks-dataset) | Large retrieval catalog | ~89,500 tracks |
+### Mood Bucket Target
 
-### How each dataset is actually used
+Classification targets are derived from the Spotify audio features of the track each user listened to. Tracks are split into four quadrants using the median of valence (0.74) and energy (0.67):
 
-- **SiTunes Stage 1**: baseline preference modeling
-- **SiTunes Stage 2 and Stage 3**: intervention-outcome learning
-- **PMEmo**: soft retrieval support only, not a strong policy-training bucket source
-- **Spotify Kaggle**: large candidate pool for final song ranking
+| Bucket | Valence | Energy | Count | Example Genres |
+|--------|---------|--------|-------|----------------|
+| happy-energetic | high | high | 242 | hip-hop, rock, pop, country |
+| calm-relaxed | high | low | 172 | jazz, rock, other |
+| tense-dark | low | high | 168 | rock, alternative, electronic |
+| sad-melancholic | low | low | 225 | pop, electronic, new age |
 
-PMEmo is not treated as reliable hard bucket supervision for the policy. In the current system it is used more cautiously: valence/arousal guidance, EDA impact hints, and soft bucket hints built from PMEmo-internal tempo percentiles.
+90 interactions (10%) had no matching track metadata and were excluded, leaving 807 interactions for training and evaluation.
 
----
+## HMM Design Choices
 
-## Observation Encoding
+The HMM is implemented from scratch in NumPy (no hmmlearn) using scaled forward-backward and Baum-Welch.
 
-### HMM Observations (0-59)
+**3 hidden states** because the wrist data has three natural physiological regimes: rest/lying (low HR, minimal activity), general sedentary (normal HR, low-moderate activity), and walking/mobile (elevated HR, high activity). More states would overfit on 897 sequences; fewer would fail to distinguish rest from wakefulness.
 
-```text
-obs = hr_bucket * 20 + intensity_bucket * 5 + activity_remapped
-```
+**27 discrete observations** (3 × 3 × 3) from tercile-binning heart rate and activity intensity, plus collapsing activity type into sedentary/walking/running. This keeps the emission matrix small enough to estimate reliably (81 parameters for 3 states × 27 observations) while capturing the key physiological dimensions. The observation encoding is `hr_bin * 9 + intensity_bin * 3 + activity_bin`.
 
-**Heart-rate bucket**
-- `0`: below-normal (`< -8`)
-- `1`: normal (`-8` to `12`)
-- `2`: elevated (`> 12`)
+**Baum-Welch training** converged in 38 iterations with Laplace smoothing (ε=1e-6) on emission and transition counts to prevent zero probabilities. Initialization uses random Dirichlet draws to break symmetry.
 
-These thresholds are on the normalized SiTunes wrist HR channel, not raw BPM.
+The trained HMM discovered three states with clear physiological interpretations:
 
-**Intensity bucket**
-- `0`: `< 10`
-- `1`: `10 - 30`
-- `2`: `30 - 80`
-- `3`: `>= 80`
+| State | Interactions | Mean HR | Activity | Interpretation |
+|-------|-------------|---------|----------|----------------|
+| 0 | 309 (34%) | -9.3 | 4.7 (very low) | Rest/lying — 86% lying timesteps |
+| 1 | 474 (53%) | +5.0 | 31.4 (moderate) | Sedentary/awake — mixed still + transitional |
+| 2 | 114 (13%) | +2.5 | 26.9 (moderate) | Walking/mobile — 88% walking timesteps |
 
-**Activity remap**
-- raw `0 -> 0` still
-- raw `1 -> 1` transition
-- raw `2 -> 2` walking
-- raw `3 -> 0` missing treated as still
-- raw `4 -> 3` lying
-- raw `5 -> 4` running
-
-This is a 60-value wrist-only observation space. Time, weather, speed, self-report, and preference signals remain downstream as explicit DQN features instead of being folded into the HMM emissions.
-
----
-
-## DQN State Vector
-
-The DQN receives a 14-dimensional state vector:
-
-```text
-[
-  belief_0,
-  belief_1,
-  belief_2,
-  time_norm,
-  activity_norm,
-  weather_norm,
-  speed_norm,
-  hr_mean_rel_norm,
-  hr_std_norm,
-  pre_valence_norm,
-  pre_arousal_norm,
-  pre_emotion_mask,
-  user_valence_pref_norm,
-  user_energy_pref_norm,
-]
-```
-
-### What the added features do
-
-- `weather_norm`, `speed_norm`, and `hr_*`: explicit context and biometric features
-- `pre_valence_norm`, `pre_arousal_norm`: the user's current reported emotion when available
-- `pre_emotion_mask`: tells the model whether those emotion values are real self-report or passive / fallback inputs
-- `user_valence_pref_norm`, `user_energy_pref_norm`: compact baseline taste profile from Stage 1
-
-This is what makes the system ambient-first but optionally calibrated: it can run on passive signals alone, but it can also incorporate a quick check-in.
-
----
-
-## Reward Model
-
-The current project does not train the policy against only a single ternary label. It separates emotional improvement from user acceptance and then recombines them for offline decision-making.
-
-### 1. Emotional Benefit
-
-```text
-emotion_score = 0.7 * (post_valence - pre_valence)
-              + 0.3 * (post_arousal - pre_arousal)
-emotion_benefit = clip(emotion_score, -1, 1)
-```
-
-### 2. Acceptance / Liking
-
-- if Stage 3 `preference` exists: use that
-- otherwise fall back to the session `rating`
-
-```text
-acceptance = (preference - 50) / 50      if preference exists
-           = (rating - 3) / 2            otherwise
-```
-
-### 3. Combined Offline Reward
-
-```text
-combined_reward = 0.7 * emotion_benefit + 0.3 * acceptance
-```
-
-The hierarchical reward model is conditioned on:
-
-- HMM state
-- pre-valence bin
-- pre-arousal bin
-- time bucket
-- activity bucket
-- action bucket
-
-Rare contexts back off to broader averages through hierarchical shrinkage instead of pretending every fine-grained state-action combination has enough data. Acceptance is also blended with user preference alignment, so the policy has a reason to care about baseline taste rather than only global averages.
-
----
-
-## Repository Structure
-
-```text
-CS4100-Project-/
-|-- data/
-|   |-- raw/
-|   |   |-- situnes/
-|   |   |-- pmemo/
-|   |   `-- spotify_kaggle/
-|   `-- processed/
-|       |-- stage1_clean.csv
-|       |-- stage2_clean.csv
-|       |-- stage3_clean.csv
-|       |-- interactions_clean.csv
-|       |-- user_preferences.json
-|       |-- wrist_obs_all.npy
-|       |-- belief_states.npy
-|       |-- state_vectors.npy
-|       |-- synthetic_clean.csv
-|       `-- synthetic_state_vectors.npy
-|-- docs/
-|   `-- PROJECT_STATE.md
-|-- models/
-|   |-- hmm.npz
-|   |-- reward_model.json
-|   |-- agent.pt
-|   `-- eval_report.json
-|-- src/
-|   |-- data/
-|   |   |-- common.py
-|   |   |-- preprocess.py
-|   |   `-- generate_synthetic.py
-|   |-- hmm/
-|   |   |-- hmm_model.py
-|   |   |-- hmm_train.py
-|   |   |-- hmm_inference.py
-|   |   `-- precompute_beliefs.py
-|   |-- rl_agent/
-|   |   |-- environment.py
-|   |   |-- dqn_agent.py
-|   |   `-- reward_model.py
-|   `-- music/
-|       `-- music_library.py
-|-- train_agent.py
-|-- eval_agent.py
-|-- demo.py
-|-- simulate_user.py
-`-- requirements.txt
-```
+Transition matrix self-loop probabilities are 0.989, 0.981, and 0.961 — states are sticky within 30-step windows, which makes physiological sense.
 
----
+## Neural Network Design Choices
 
-## Setup
+The classifier is a two-hidden-layer feedforward network implemented in PyTorch.
 
-### 1. Clone the repository
+**Layer sizes: 21 → 64 → 32 → 4.** The input dimension (21) comes from the full feature set. The first hidden layer (64 units) is roughly 3× the input dimension — a common heuristic that gives the network enough capacity to learn nonlinear feature combinations without being so large that it memorizes the training set. The second hidden layer (32 units) compresses the representation toward the output dimension (4 classes), creating a bottleneck that forces the network to learn compact, generalizable features rather than preserving all input information. With only 543 training examples, a larger network (e.g., 128 → 64) would overfit faster; a smaller one (e.g., 32 → 16) might underfit on 21 input features.
 
-```bash
-git clone <your-repo-url>
-cd CS4100-Project-
-```
+**ReLU activations** because they're the standard default for feedforward networks — no vanishing gradient problem, computationally cheap, and there's no reason to use anything fancier for this problem.
 
-### 2. Create a Python environment
+**Dropout (0.3)** between hidden layers as regularization. With 543 training examples and ~3,000 learnable parameters, overfitting is the primary risk. 0.3 means each neuron has a 30% chance of being zeroed during training, which prevents co-adaptation and acts as implicit ensemble averaging.
 
-Python 3.10+ is recommended.
+**Adam optimizer (lr=0.001, weight_decay=1e-4)** because Adam adapts per-parameter learning rates and handles sparse gradients well. The learning rate 0.001 is Adam's recommended default. Weight decay adds L2 regularization to further constrain the model.
 
-```bash
-python -m venv .venv
-```
+**Class-weighted CrossEntropyLoss** to handle mild class imbalance (242 happy-energetic vs. 168 tense-dark). Weights are inversely proportional to class frequency so the model doesn't just learn to predict the majority class.
 
-Activate it:
+**Early stopping (patience=30)** monitors validation loss and restores the best checkpoint. This is the most important regularization mechanism — it stops training before the model memorizes the training set.
 
-```bash
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-
-# macOS / Linux
-source .venv/bin/activate
-```
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Download the data
-
-**SiTunes (required)**
-
-The code expects the SiTunes root here:
-
-```text
-data/raw/situnes/SiTunes/
-```
-
-A direct clone that matches the code path is:
-
-```bash
-git clone https://github.com/JiayuLi-997/SiTunes_dataset data/raw/situnes/SiTunes
-```
-
-If you download it manually, make sure the final folder name is exactly `SiTunes`.
-
-**PMEmo (optional, recommended for retrieval)**
-
-Place the PMEmo files under:
-
-```text
-data/raw/pmemo/
-```
-
-Required files for the current pipeline:
-
-- `annotations/static_annotations.csv`
-- `annotations/static_annotations_std.csv`
-- `features/static_features.csv`
-- `metadata.csv`
-- optional but supported: `EDA/*.csv`
-
-**Spotify Kaggle (optional, recommended for retrieval breadth)**
-
-Download `dataset.csv` from Kaggle and place it here:
-
-```text
-data/raw/spotify_kaggle/dataset.csv
-```
-
-If PMEmo or Spotify are missing, the core SiTunes pipeline still works. You can either let preprocessing auto-skip missing optional data, or be explicit with flags.
-
----
-
-## Running the Project
-
-> Always run commands from the project root.
-
-### Step 1 - Preprocess the datasets
-
-Full preprocessing:
-
-```bash
-python -m src.data.preprocess
-```
-
-Minimum SiTunes-only preprocessing:
-
-```bash
-python -m src.data.preprocess --skip-pmemo --skip-spotify
-```
-
-This builds:
-
-- cleaned SiTunes interaction tables
-- user preference profiles from Stage 1
-- wrist observation sequences
-- PMEmo and Spotify cleaned catalogs when available
-- split manifests and dataset audit files
-
-### Step 2 - Train the HMM
-
-```bash
-python src/hmm/hmm_train.py
-```
-
-This trains the 3-state, 60-observation HMM and saves:
-
-- `models/hmm.npz`
-- `models/hmm_metrics.json`
-- `models/hmm_convergence.csv`
-
-### Step 3 - Precompute beliefs and 14D state vectors
-
-```bash
-python src/hmm/precompute_beliefs.py
-```
-
-This saves belief-state and state-vector artifacts used by RL training and evaluation.
-
-### Step 4 - Build synthetic augmentation
-
-```bash
-python src/data/generate_synthetic.py
-```
-
-This step is optional, but the default training workflow expects synthetic artifacts to exist if you want mixed real + synthetic training.
-
-### Step 5 - Train the DQN
-
-Recommended command:
-
-```bash
-python train_agent.py --synthetic-weight 0.25
-```
-
-Other supported flags:
-
-```bash
-python train_agent.py --synthetic-weight 0.25 --reward-mode expected --alpha 0.7 --beta 0.3
-```
-
-### Step 6 - Evaluate the system
-
-```bash
-python eval_agent.py
-```
-
-Interactive mode:
-
-```bash
-python eval_agent.py --interactive
-```
-
-This writes `models/eval_report.json`.
-
-### Step 7 - Run the presentation demo
-
-```bash
-python demo.py
-```
-
-This prints the main comparison scenarios used in the presentation story:
-
-- same physical state, different emotion
-- same context, different preference
-- same user, different scenarios
-
-### Step 8 - Run the multi-session simulation
-
-```bash
-python simulate_user.py
-```
-
----
-
-## Key Design Decisions
-
-**Why only 3 hidden states?**  
-SiTunes is heavily imbalanced toward sedentary contexts. Finer latent-state granularity looked attractive on paper, but it was not stable or defensible on this dataset.
-
-**Why keep time, weather, speed, and preference outside the HMM?**  
-Putting every variable into the HMM observation encoding creates unnecessary sparsity. The HMM works better as a wrist-signal belief model, while explicit context and taste features remain visible to the DQN.
-
-**Why a 14D state instead of the original 5D state?**  
-The old state ignored weather, speed, HR summaries, pre-emotions, and Stage 1 preferences. The 14D state lets the policy separate cases that looked identical before, such as a stressed still person versus a balanced still person.
-
-**Why keep HMM + DQN instead of switching to a contextual bandit now?**  
-The course expects from-scratch HMM and DQN components. The current implementation keeps that backbone while making the offline decision problem more honest and better conditioned.
-
-**Why a two-part reward?**  
-A song can be helpful but disliked, or liked but not helpful. Keeping emotional benefit and acceptance separate makes the system easier to reason about and easier to evaluate honestly.
-
-**Why is PMEmo not a main policy-training source?**  
-PMEmo helps retrieval and music-affect scoring, but it is not trusted as strong action-bucket supervision. The current pipeline only uses it as a soft retrieval signal.
-
-**Why not claim synthetic data solves sparse action buckets?**  
-Synthetic augmentation helps context coverage and regularization. It does not create real evidence for buckets that barely appear in SiTunes.
-
----
+**5-seed averaging** for reported results. With small datasets, a single random initialization can produce misleading numbers. Averaging across seeds gives mean ± std, which is more honest.
 
 ## Results
 
-Current end-to-end results on the held-out test set (5 users, 311 interactions):
+### Ablation Study
 
-| Metric | DQN | State-Prior | Always-7 | Random |
-|--------|-----|-------------|----------|--------|
-| Combined reward | +0.1630 | **+0.1645** | +0.0805 | +0.0778 |
-| Emotion benefit | +0.0473 | +0.0438 | +0.0083 | - |
-| Acceptance | +0.4329 | **+0.4462** | +0.2490 | - |
-| Regret (vs oracle) | 0.0040 | **0.0024** | 0.0864 | - |
+All models were evaluated on 264 held-out interactions from 10 users not seen during training.
 
-| HMM Metric | Value |
-|------------|-------|
-| States used on test | 3 / 3 |
-| Mean belief entropy | 0.159 |
-| Unique rounded belief vectors | 473 |
+| Model | Features | Accuracy | F1 Macro |
+|-------|----------|----------|----------|
+| Random baseline | — | 0.246 ± 0.025 | 0.244 |
+| Majority baseline | — | 0.295 | 0.114 |
+| **A: Full model** | HMM + context + physio + emotion | 0.270 ± 0.014 | 0.230 ± 0.039 |
+| **B: No HMM** | context + physio + emotion | **0.292 ± 0.031** | **0.274 ± 0.028** |
+| **C: No emotion** | HMM + context + physio | 0.283 ± 0.022 | 0.260 ± 0.040 |
+| **D: Context only** | time + weather + activity | 0.275 ± 0.020 | 0.265 ± 0.026 |
 
-What these numbers mean:
+### Interpretation
 
-- The rebuilt system clearly beats trivial baselines such as `always7` and uniform random.
-- The current DQN is presentation-safe and behaviorally richer than the trivial baselines, but it is still slightly below the `state_prior` baseline on held-out combined reward.
-- The HMM uses all 3 states, but belief entropy is still modest. This is a coarse latent-state model, not deep mood decoding.
-- The two-part reward shows that the system evaluates both emotional improvement and user acceptance.
-- The main qualitative win is that the policy now reacts to emotion and taste features that the old 5D pipeline ignored.
+No model variant meaningfully exceeds the baselines. The full model (A) actually performs *worst*, suggesting that adding more features gives the network more noise to overfit to. The HMM belief states hurt rather than help (removing them improves accuracy by +0.023). All differences are within error bars.
 
-The strongest presentation results are qualitative:
+The HMM successfully discovers physiologically meaningful latent states — rest, sedentary, and walking are cleanly separated. The problem is downstream: these physical activity states don't predict music mood preference. Whether someone is lying down or walking has near-zero correlation with whether they'll listen to happy-energetic vs. sad-melancholic music. The same is true for time of day, weather, temperature, and self-reported pre-emotion.
 
-- Same physical state + different mood -> different bucket
-- Same context + different taste profile -> different track ranking, sometimes different bucket
-- Same user + different scenario -> different belief state, bucket, and explanation
+This is a negative result, but an informative one. It suggests that situational music preference in this dataset is driven primarily by personal taste and recommender system behavior rather than by immediate physiological or environmental context.
 
----
+## Datasets That Could Provide Lift
 
-## Limitations
+We evaluated several supplementary datasets during project scoping:
 
-1. **Still an offline system**  
-   The policy is trained from historical data rather than live online feedback.
+**#nowplaying-RS** (11.6M listening events, CC BY 4.0 on Zenodo) has Spotify audio features, timestamps, geolocation, and hashtag-derived mood context. Its scale could support training a larger classifier, but it lacks physiological signals entirely.
 
-2. **Small intervention dataset**  
-   Some action buckets are extremely sparse in SiTunes, so low usage of those buckets is often rational rather than a bug.
+**LifeSnaps** (71 participants, 4 months, Fitbit Sense data on Zenodo) has wristband heart rate, steps, and ecological momentary mood assessments from daily life. The signal format closely matches SiTunes' wrist data, making it suitable for HMM pretraining. However, mood labels are 96.8% sparse (only ~5,000 of 160,000 hourly records have mood annotations), and the hourly temporal resolution is much coarser than SiTunes' per-minute windowing.
 
-3. **Exercise learning is weak**  
-   Running-like contexts are rare in the cleaned data, so exercise-specific claims should be kept modest.
+**CASE** (30 subjects, continuous V/A annotations at 20Hz with 1000Hz physio) provides the densest physio→affect mapping available, but from chest-mounted lab sensors during passive video watching — the domain gap to consumer wristbands during daily life is too large for practical transfer.
 
-4. **The HMM captures coarse latent context-energy structure, not deep psychology**  
-   The HMM is useful, but it should not be oversold as direct mood recognition from wrist data.
+**MuSe** (90,001 tracks with valence/arousal/dominance from Last.fm tags) validated that our four mood quadrants correspond to musically coherent categories (calm-relaxed maps to indie/ambient/folk; tense-dark maps to rock/alternative/electronic). We used this for methodology justification rather than as a pipeline dependency.
 
-5. **Ambient-first support exists, but full passive inference is not separately benchmarked yet**  
-   The state interface supports no-check-in usage through `pre_emotion_mask`, but most real training rows still include self-report.
+## Next Steps
 
-6. **PMEmo remains auxiliary**  
-   It improves retrieval and music-affect guidance, not the core causal story of "this intervention helped this user in this situation."
+**Change the prediction target.** The current target (track mood bucket) is a property of the music, largely determined by the recommender system rather than the user's situation. Predicting the user's post-emotion quadrant — "will this person feel happy-energetic or sad-melancholic after listening?" — has stronger theoretical grounding. The SiTunes paper found that subjective pre-emotion features significantly predict post-listening emotional outcomes.
 
----
+**Add user-level features.** Per-user mood bucket distributions vary substantially (some users listen to 50%+ happy-energetic; others favor tense-dark). A user preference embedding or historical bucket proportions from training data would capture personal taste, which our exploration suggests is the dominant factor in music choice.
 
-## References
+**Reduce classification granularity.** Binary classification (high-valence vs. low-valence, or high-energy vs. low-energy) may surface signal that 4-way classification is too noisy to detect.
 
-- Li, J. et al. (2024). *SiTunes: A Situational Music Recommendation Dataset with Physiological and Psychological Signals.*
-- Zhang, K. et al. (2018). *The PMEmo Dataset for Music Emotion Recognition.*
-- van Hasselt, H. et al. (2016). *Deep Reinforcement Learning with Double Q-learning.*
-- Russell, J. A. (1980). *A circumplex model of affect.*
+**Pretrain the HMM on LifeSnaps.** Despite sparsity, LifeSnaps offers 5,000+ labeled physio windows from diverse daily-life activities. Since the HMM trains unsupervised, even the unlabeled physio sequences (60,000+ hours with heart rate and steps) would help it discover more robust physiological states than SiTunes' 897 sedentary-dominated sequences alone.
+
+**Use Stage 3 data.** SiTunes Stage 3 (509 interactions from a situational recommender) may show stronger context→preference coupling since the recommender was explicitly designed to adapt to situations. Training on Stage 2 and evaluating on Stage 3 tests cross-recommender generalization.
