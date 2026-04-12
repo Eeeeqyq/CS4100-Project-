@@ -25,6 +25,11 @@ MODELS = Path("models")
 def load_artifacts():
     df = pd.read_csv(PROCESSED_DIR / "interactions_clean.csv")
     states = np.load(PROCESSED_DIR / "state_vectors.npy")
+    if "step_active" not in df.columns:
+        if "step_nonzero_frac" in df.columns:
+            df["step_active"] = (df["step_nonzero_frac"].astype(float) >= 0.05).astype(int)
+        else:
+            df["step_active"] = 0
     df["hmm_state"] = states[:, :3].argmax(axis=1)
     hmm = HMM.load(MODELS / "hmm.npz")
     agent = DQNAgent(state_dim=STATE_DIM, action_dim=8, hidden=128)
@@ -48,6 +53,7 @@ def evaluate_policy(actions: np.ndarray, df: pd.DataFrame, reward_model: Hierarc
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
+                int(row.get("step_active", 0)),
                 bucket,
                 pre_valence=float(row.get("emo_pre_valence", 0.0)),
                 pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
@@ -81,17 +87,24 @@ def evaluate_policy(actions: np.ndarray, df: pd.DataFrame, reward_model: Hierarc
 def state_prior_actions(train_df: pd.DataFrame, reward_model: HierarchicalRewardModel, df: pd.DataFrame) -> np.ndarray:
     best_by_state = {}
     for hmm_state in range(3):
-        subset = train_df[train_df["hmm_state"] == hmm_state]
-        if subset.empty:
-            subset = train_df
-        time_mode = int(subset["time_bucket"].mode().iloc[0])
-        activity_mode = int(subset["activity_majority"].mode().iloc[0])
-        scores = [
-            reward_model.expected_reward(hmm_state, time_mode, activity_mode, action)
-            for action in range(8)
-        ]
-        best_by_state[hmm_state] = int(np.argmax(scores))
-    return df["hmm_state"].map(best_by_state).to_numpy(dtype=np.int32)
+        subset_state = train_df[train_df["hmm_state"] == hmm_state]
+        if subset_state.empty:
+            subset_state = train_df
+        for step_active in [0, 1]:
+            subset = subset_state[subset_state["step_active"] == step_active]
+            if subset.empty:
+                subset = subset_state
+            time_mode = int(subset["time_bucket"].mode().iloc[0])
+            activity_mode = int(subset["activity_majority"].mode().iloc[0])
+            scores = [
+                reward_model.expected_reward(hmm_state, time_mode, activity_mode, step_active, action)
+                for action in range(8)
+            ]
+            best_by_state[(hmm_state, step_active)] = int(np.argmax(scores))
+    return np.asarray(
+        [best_by_state[(int(row["hmm_state"]), int(row.get("step_active", 0)))] for _, row in df.iterrows()],
+        dtype=np.int32,
+    )
 
 
 def section_a_held_out(df: pd.DataFrame, states: np.ndarray, agent: DQNAgent, reward_model: HierarchicalRewardModel) -> dict:
@@ -112,6 +125,7 @@ def section_a_held_out(df: pd.DataFrame, states: np.ndarray, agent: DQNAgent, re
                         int(row["hmm_state"]),
                         int(row["time_bucket"]),
                         int(row["activity_majority"]),
+                        int(row.get("step_active", 0)),
                         action,
                         pre_valence=float(row.get("emo_pre_valence", 0.0)),
                         pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
@@ -158,6 +172,9 @@ SCENARIOS = [
         "intensity": 5,
         "activity": 0,
         "hr_mean": 18.0,
+        "step_mean": 0.0,
+        "step_nonzero_frac": 0.0,
+        "step_active": 0,
         "time": 1,
         "weather": 2,
         "speed": 0.1,
@@ -172,6 +189,9 @@ SCENARIOS = [
         "intensity": 5,
         "activity": 0,
         "hr_mean": 18.0,
+        "step_mean": 0.0,
+        "step_nonzero_frac": 0.0,
+        "step_active": 0,
         "time": 1,
         "weather": 2,
         "speed": 0.1,
@@ -180,6 +200,23 @@ SCENARIOS = [
         "mask": 1.0,
         "mode": "focus",
         "user_profile": {"user_valence_pref": 0.20, "user_energy_pref": -0.10, "top_genres": ["indie", "classical"]},
+    },
+    {
+        "name": "Same signal, now with steps",
+        "intensity": 3,
+        "activity": 0,
+        "hr_mean": 8.0,
+        "step_mean": 8.0,
+        "step_nonzero_frac": 0.30,
+        "step_active": 1,
+        "time": 1,
+        "weather": 1,
+        "speed": 0.0,
+        "pre_valence": -0.80,
+        "pre_arousal": 0.50,
+        "mask": 1.0,
+        "mode": "uplift",
+        "user_profile": {"user_valence_pref": 0.10, "user_energy_pref": -0.10, "top_genres": ["indie", "pop", "ambient"]},
     },
 ]
 
@@ -206,12 +243,15 @@ def section_b_gallery(hmm: HMM, agent: DQNAgent, reward_model: HierarchicalRewar
             pre_emotion_mask=scenario["mask"],
             user_valence_pref=scenario["user_profile"]["user_valence_pref"],
             user_energy_pref=scenario["user_profile"]["user_energy_pref"],
+            step_mean=scenario.get("step_mean", 0.0),
+            step_nonzero_frac=scenario.get("step_nonzero_frac", 0.0),
         )
         action = int(agent.greedy_action(state))
         components = reward_model.expected_components(
             int(np.argmax(belief)),
             int(scenario["time"]),
             int(activity_remapped),
+            int(scenario.get("step_active", 0)),
             action,
             pre_valence=float(scenario["pre_valence"]),
             pre_arousal=float(scenario["pre_arousal"]),
@@ -223,7 +263,8 @@ def section_b_gallery(hmm: HMM, agent: DQNAgent, reward_model: HierarchicalRewar
         print(f"\n{scenario['name']}")
         print(
             f"  Context: intensity={scenario['intensity']:<4} hr={scenario['hr_mean']:<5.1f} "
-            f"activity={ACTIVITY_LABELS[activity_remapped]:<13} time={TIME_LABELS[scenario['time']]}"
+            f"activity={ACTIVITY_LABELS[activity_remapped]:<13} time={TIME_LABELS[scenario['time']]} "
+            f"step_active={int(scenario.get('step_active', 0))}"
         )
         print(
             f"  Mood   : pre_valence={scenario['pre_valence']:+.2f} "
@@ -236,9 +277,10 @@ def section_b_gallery(hmm: HMM, agent: DQNAgent, reward_model: HierarchicalRewar
             f"emotion={components['emotion_benefit']:+.3f}  accept={components['acceptance']:+.3f}"
         )
         for _, track in tracks.iterrows():
+            explanation = f" | {track['dynamic_reason']}" if str(track.get("dynamic_reason", "")) else ""
             print(
                 f"    - {track['track_name']} / {track['artist']} "
-                f"[{track['source']}, score={track['score']:.2f}]"
+                f"[{track['source']}, score={track['score']:.2f}]{explanation}"
             )
 
 
@@ -263,6 +305,16 @@ def interactive_mode(hmm: HMM, agent: DQNAgent, reward_model: HierarchicalReward
             break
         hr_mean = float(raw) if raw else 0.0
 
+        raw = input("Step mean (default 0): ").strip()
+        if raw.lower() == "q":
+            break
+        step_mean = float(raw) if raw else 0.0
+
+        raw = input("Step nonzero fraction in [0,1] (default 0): ").strip()
+        if raw.lower() == "q":
+            break
+        step_nonzero_frac = float(raw) if raw else 0.0
+
         raw = input("Time bucket 0=morning 1=afternoon 2=evening (default 1): ").strip()
         if raw.lower() == "q":
             break
@@ -279,6 +331,7 @@ def interactive_mode(hmm: HMM, agent: DQNAgent, reward_model: HierarchicalReward
         pre_arousal = float(raw) if raw else None
 
         mask = 1.0 if pre_valence is not None and pre_arousal is not None else 0.0
+        step_active = int(step_nonzero_frac >= 0.05)
         activity_remapped = ACTIVITY_REMAP.get(activity, 0)
         belief = corrected_belief(hmm, encode_obs_seq(intensity, activity, hr_mean=hr_mean), activity_remapped)
         state = state_vector_from_components(
@@ -294,12 +347,15 @@ def interactive_mode(hmm: HMM, agent: DQNAgent, reward_model: HierarchicalReward
             pre_emotion_mask=mask,
             user_valence_pref=0.0,
             user_energy_pref=0.0,
+            step_mean=step_mean,
+            step_nonzero_frac=step_nonzero_frac,
         )
         action = int(agent.greedy_action(state))
         components = reward_model.expected_components(
             int(np.argmax(belief)),
             time_bucket,
             activity_remapped,
+            step_active,
             action,
             pre_valence=0.0 if pre_valence is None else float(pre_valence),
             pre_arousal=0.0 if pre_arousal is None else float(pre_arousal),
@@ -312,10 +368,12 @@ def interactive_mode(hmm: HMM, agent: DQNAgent, reward_model: HierarchicalReward
         print(
             f"Recommended bucket: {action} ({BUCKET_LABELS[action]})  "
             f"combined={components['combined_reward']:+.3f}  "
-            f"emotion={components['emotion_benefit']:+.3f}  accept={components['acceptance']:+.3f}"
+            f"emotion={components['emotion_benefit']:+.3f}  accept={components['acceptance']:+.3f} "
+            f"step_active={step_active}"
         )
         for _, track in tracks.iterrows():
-            print(f"  - {track['track_name']} / {track['artist']} [{track['source']}]")
+            explanation = f" | {track['dynamic_reason']}" if str(track.get("dynamic_reason", "")) else ""
+            print(f"  - {track['track_name']} / {track['artist']} [{track['source']}]{explanation}")
         print()
 
 

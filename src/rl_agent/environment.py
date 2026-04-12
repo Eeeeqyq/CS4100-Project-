@@ -50,10 +50,12 @@ class MusicEnv:
         assert 0 <= int(action) < self.ACTION_DIM, f"action must be in [0, {self.ACTION_DIM - 1}]"
 
         row = self.df.iloc[int(self._row_idx)]
+        step_active = int(row.get("step_active", 0))
         components = self.reward_model.expected_components(
             int(row["hmm_state"]),
             int(row["time_bucket"]),
             int(row["activity_majority"]),
+            step_active,
             int(action),
             pre_valence=float(row.get("emo_pre_valence", 0.0)),
             pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
@@ -66,6 +68,7 @@ class MusicEnv:
                     int(row["hmm_state"]),
                     int(row["time_bucket"]),
                     int(row["activity_majority"]),
+                    step_active,
                     int(action),
                     pre_valence=float(row.get("emo_pre_valence", 0.0)),
                     pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
@@ -85,12 +88,14 @@ class MusicEnv:
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
+                step_active,
                 int(action),
                 pre_valence=float(row.get("emo_pre_valence", 0.0)),
                 pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
             ),
             "user_id": int(row.get("user_id", -1)),
             "is_synthetic": bool(row.get("is_synthetic", False)),
+            "step_active": step_active,
         }
         return np.zeros(self.STATE_DIM, dtype=np.float32), reward, True, info
 

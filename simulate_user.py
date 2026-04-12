@@ -26,10 +26,10 @@ USER_PROFILES = [
             "top_genres": ["indie", "ambient", "piano"],
         },
         "sessions": [
-            {"intensity": 4, "hr_mean": 20.0, "activity_raw": 0, "time_bucket": 2, "weather_bucket": 2, "gps_speed": 0.0, "valence": -0.45, "arousal": 0.55, "mask": 1.0},
-            {"intensity": 6, "hr_mean": 12.0, "activity_raw": 0, "time_bucket": 1, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.25, "arousal": 0.30, "mask": 0.0},
-            {"intensity": 8, "hr_mean": 8.0, "activity_raw": 0, "time_bucket": 1, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.10, "arousal": 0.20, "mask": 0.0},
-            {"intensity": 15, "hr_mean": 10.0, "activity_raw": 2, "time_bucket": 0, "weather_bucket": 0, "gps_speed": 1.8, "valence": 0.10, "arousal": 0.10, "mask": 1.0},
+            {"intensity": 4, "hr_mean": 20.0, "activity_raw": 0, "step_mean": 0.0, "step_nonzero_frac": 0.0, "step_active": 0, "time_bucket": 2, "weather_bucket": 2, "gps_speed": 0.0, "valence": -0.45, "arousal": 0.55, "mask": 1.0},
+            {"intensity": 6, "hr_mean": 12.0, "activity_raw": 0, "step_mean": 0.0, "step_nonzero_frac": 0.0, "step_active": 0, "time_bucket": 1, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.25, "arousal": 0.30, "mask": 0.0},
+            {"intensity": 8, "hr_mean": 8.0, "activity_raw": 0, "step_mean": 0.5, "step_nonzero_frac": 0.03, "step_active": 0, "time_bucket": 1, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.10, "arousal": 0.20, "mask": 0.0},
+            {"intensity": 15, "hr_mean": 10.0, "activity_raw": 2, "step_mean": 8.0, "step_nonzero_frac": 0.35, "step_active": 1, "time_bucket": 0, "weather_bucket": 0, "gps_speed": 1.8, "valence": 0.10, "arousal": 0.10, "mask": 1.0},
         ],
     },
     {
@@ -41,10 +41,10 @@ USER_PROFILES = [
             "top_genres": ["rock", "pop", "electro"],
         },
         "sessions": [
-            {"intensity": 110, "hr_mean": 26.0, "activity_raw": 5, "time_bucket": 0, "weather_bucket": 0, "gps_speed": 4.8, "valence": 0.10, "arousal": 0.55, "mask": 0.0},
-            {"intensity": 95, "hr_mean": 22.0, "activity_raw": 5, "time_bucket": 0, "weather_bucket": 0, "gps_speed": 4.4, "valence": 0.15, "arousal": 0.60, "mask": 0.0},
-            {"intensity": 5, "hr_mean": 2.0, "activity_raw": 4, "time_bucket": 2, "weather_bucket": 1, "gps_speed": 0.0, "valence": 0.25, "arousal": -0.10, "mask": 1.0},
-            {"intensity": 20, "hr_mean": 8.0, "activity_raw": 2, "time_bucket": 2, "weather_bucket": 1, "gps_speed": 1.5, "valence": 0.20, "arousal": -0.05, "mask": 0.0},
+            {"intensity": 110, "hr_mean": 26.0, "activity_raw": 5, "step_mean": 42.0, "step_nonzero_frac": 0.85, "step_active": 1, "time_bucket": 0, "weather_bucket": 0, "gps_speed": 4.8, "valence": 0.10, "arousal": 0.55, "mask": 0.0},
+            {"intensity": 95, "hr_mean": 22.0, "activity_raw": 5, "step_mean": 33.0, "step_nonzero_frac": 0.70, "step_active": 1, "time_bucket": 0, "weather_bucket": 0, "gps_speed": 4.4, "valence": 0.15, "arousal": 0.60, "mask": 0.0},
+            {"intensity": 5, "hr_mean": 2.0, "activity_raw": 4, "step_mean": 0.0, "step_nonzero_frac": 0.0, "step_active": 0, "time_bucket": 2, "weather_bucket": 1, "gps_speed": 0.0, "valence": 0.25, "arousal": -0.10, "mask": 1.0},
+            {"intensity": 20, "hr_mean": 8.0, "activity_raw": 2, "step_mean": 10.0, "step_nonzero_frac": 0.40, "step_active": 1, "time_bucket": 2, "weather_bucket": 1, "gps_speed": 1.5, "valence": 0.20, "arousal": -0.05, "mask": 0.0},
         ],
     },
     {
@@ -56,10 +56,10 @@ USER_PROFILES = [
             "top_genres": ["acoustic", "folk", "ambient"],
         },
         "sessions": [
-            {"intensity": 5, "hr_mean": 6.0, "activity_raw": 0, "time_bucket": 0, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.15, "arousal": -0.10, "mask": 1.0},
-            {"intensity": 6, "hr_mean": 7.0, "activity_raw": 0, "time_bucket": 1, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.05, "arousal": 0.05, "mask": 0.0},
-            {"intensity": 4, "hr_mean": 3.0, "activity_raw": 0, "time_bucket": 1, "weather_bucket": 2, "gps_speed": 0.0, "valence": -0.20, "arousal": -0.20, "mask": 1.0},
-            {"intensity": 3, "hr_mean": 1.0, "activity_raw": 4, "time_bucket": 2, "weather_bucket": 1, "gps_speed": 0.0, "valence": 0.00, "arousal": -0.15, "mask": 1.0},
+            {"intensity": 5, "hr_mean": 6.0, "activity_raw": 0, "step_mean": 0.0, "step_nonzero_frac": 0.0, "step_active": 0, "time_bucket": 0, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.15, "arousal": -0.10, "mask": 1.0},
+            {"intensity": 6, "hr_mean": 7.0, "activity_raw": 0, "step_mean": 0.0, "step_nonzero_frac": 0.0, "step_active": 0, "time_bucket": 1, "weather_bucket": 1, "gps_speed": 0.0, "valence": -0.05, "arousal": 0.05, "mask": 0.0},
+            {"intensity": 4, "hr_mean": 3.0, "activity_raw": 0, "step_mean": 0.0, "step_nonzero_frac": 0.0, "step_active": 0, "time_bucket": 1, "weather_bucket": 2, "gps_speed": 0.0, "valence": -0.20, "arousal": -0.20, "mask": 1.0},
+            {"intensity": 3, "hr_mean": 1.0, "activity_raw": 4, "step_mean": 0.0, "step_nonzero_frac": 0.0, "step_active": 0, "time_bucket": 2, "weather_bucket": 1, "gps_speed": 0.0, "valence": 0.00, "arousal": -0.15, "mask": 1.0},
         ],
     },
 ]
@@ -93,7 +93,7 @@ def main() -> None:
         print(profile["name"])
         print("=" * 112)
         print(
-            f"{'Session':<8} {'Context':<28} {'Mask':<6} {'Bucket':<15} "
+            f"{'Session':<8} {'Context':<28} {'Mask':<6} {'Step':<6} {'Bucket':<15} "
             f"{'Combined':<10} {'Emotion':<10} {'Accept':<10} {'Valence':<14}"
         )
         print("-" * 112)
@@ -123,12 +123,15 @@ def main() -> None:
                 pre_emotion_mask=session["mask"],
                 user_valence_pref=profile["user_profile"]["user_valence_pref"],
                 user_energy_pref=profile["user_profile"]["user_energy_pref"],
+                step_mean=session.get("step_mean", 0.0),
+                step_nonzero_frac=session.get("step_nonzero_frac", 0.0),
             )
             action = int(agent.greedy_action(state))
             components = reward_model.expected_components(
                 int(np.argmax(belief)),
                 session["time_bucket"],
                 activity_remapped,
+                int(session.get("step_active", 0)),
                 action,
                 pre_valence=float(session["valence"]),
                 pre_arousal=float(session["arousal"]),
@@ -139,6 +142,7 @@ def main() -> None:
                 int(np.argmax(belief)),
                 session["time_bucket"],
                 activity_remapped,
+                int(session.get("step_active", 0)),
                 action,
                 pre_valence=float(session["valence"]),
                 pre_arousal=float(session["arousal"]),
@@ -155,7 +159,7 @@ def main() -> None:
 
             context_text = f"{TIME_LABELS[session['time_bucket']]} / {ACTIVITY_LABELS[activity_remapped]}"
             print(
-                f"{idx + 1:<8} {context_text:<28} {int(session['mask']):<6} {BUCKET_LABELS[action]:<15} "
+                f"{idx + 1:<8} {context_text:<28} {int(session['mask']):<6} {int(session.get('step_active', 0)):<6} {BUCKET_LABELS[action]:<15} "
                 f"{components['combined_reward']:+.3f}     {components['emotion_benefit']:+.3f}     "
                 f"{components['acceptance']:+.3f}     {mood_bar(session['valence']):<14}"
             )
@@ -173,7 +177,8 @@ def main() -> None:
         print(f"  Final bucket: {last_action} ({BUCKET_LABELS[last_action]})")
         print("  Example tracks:")
         for _, track in tracks.iterrows():
-            print(f"    - {track['track_name']} / {track['artist']} [{track['source']}]")
+            explanation = f" | {track['dynamic_reason']}" if str(track.get("dynamic_reason", "")) else ""
+            print(f"    - {track['track_name']} / {track['artist']} [{track['source']}]{explanation}")
 
     print("\n" + "=" * 112)
     print("Simulation complete.")

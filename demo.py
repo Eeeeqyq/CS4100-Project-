@@ -23,6 +23,9 @@ COMPARISON_GROUPS = [
                 "intensity": 5,
                 "hr_mean": 18.0,
                 "activity_raw": 0,
+                "step_mean": 0.0,
+                "step_nonzero_frac": 0.0,
+                "step_active": 0,
                 "time_bucket": 1,
                 "weather_bucket": 2,
                 "gps_speed": 0.1,
@@ -42,6 +45,9 @@ COMPARISON_GROUPS = [
                 "intensity": 5,
                 "hr_mean": 18.0,
                 "activity_raw": 0,
+                "step_mean": 0.0,
+                "step_nonzero_frac": 0.0,
+                "step_active": 0,
                 "time_bucket": 1,
                 "weather_bucket": 2,
                 "gps_speed": 0.1,
@@ -66,6 +72,9 @@ COMPARISON_GROUPS = [
                 "intensity": 5,
                 "hr_mean": 18.0,
                 "activity_raw": 0,
+                "step_mean": 0.0,
+                "step_nonzero_frac": 0.0,
+                "step_active": 0,
                 "time_bucket": 1,
                 "weather_bucket": 2,
                 "gps_speed": 0.1,
@@ -85,6 +94,9 @@ COMPARISON_GROUPS = [
                 "intensity": 5,
                 "hr_mean": 18.0,
                 "activity_raw": 0,
+                "step_mean": 0.0,
+                "step_nonzero_frac": 0.0,
+                "step_active": 0,
                 "time_bucket": 1,
                 "weather_bucket": 2,
                 "gps_speed": 0.1,
@@ -109,6 +121,9 @@ COMPARISON_GROUPS = [
                 "intensity": 6,
                 "hr_mean": 6.0,
                 "activity_raw": 0,
+                "step_mean": 0.0,
+                "step_nonzero_frac": 0.0,
+                "step_active": 0,
                 "time_bucket": 1,
                 "weather_bucket": 1,
                 "gps_speed": 0.0,
@@ -128,6 +143,9 @@ COMPARISON_GROUPS = [
                 "intensity": 4,
                 "hr_mean": 2.0,
                 "activity_raw": 4,
+                "step_mean": 0.0,
+                "step_nonzero_frac": 0.0,
+                "step_active": 0,
                 "time_bucket": 2,
                 "weather_bucket": 1,
                 "gps_speed": 0.0,
@@ -147,6 +165,9 @@ COMPARISON_GROUPS = [
                 "intensity": 16,
                 "hr_mean": 10.0,
                 "activity_raw": 2,
+                "step_mean": 9.0,
+                "step_nonzero_frac": 0.35,
+                "step_active": 1,
                 "time_bucket": 0,
                 "weather_bucket": 0,
                 "gps_speed": 2.3,
@@ -159,6 +180,55 @@ COMPARISON_GROUPS = [
                     "user_valence_pref": 0.15,
                     "user_energy_pref": -0.15,
                     "top_genres": ["indie", "ambient", "classical"],
+                },
+            },
+        ],
+    },
+    {
+        "title": "Same HR, Different Movement Signal",
+        "cases": [
+            {
+                "name": "Stress Signal Without Movement",
+                "intensity": 3,
+                "hr_mean": 8.0,
+                "activity_raw": 0,
+                "step_mean": 0.0,
+                "step_nonzero_frac": 0.0,
+                "step_active": 0,
+                "time_bucket": 1,
+                "weather_bucket": 1,
+                "gps_speed": 0.0,
+                "pre_valence": -0.80,
+                "pre_arousal": 0.50,
+                "pre_emotion_mask": 1.0,
+                "mode": "uplift",
+                "goal": "Treat the context as stressed and stationary because there is no movement evidence.",
+                "user_profile": {
+                    "user_valence_pref": 0.10,
+                    "user_energy_pref": -0.10,
+                    "top_genres": ["indie", "pop", "ambient"],
+                },
+            },
+            {
+                "name": "Same Signal, But Steps Present",
+                "intensity": 3,
+                "hr_mean": 8.0,
+                "activity_raw": 0,
+                "step_mean": 8.0,
+                "step_nonzero_frac": 0.30,
+                "step_active": 1,
+                "time_bucket": 1,
+                "weather_bucket": 1,
+                "gps_speed": 0.0,
+                "pre_valence": -0.80,
+                "pre_arousal": 0.50,
+                "pre_emotion_mask": 1.0,
+                "mode": "uplift",
+                "goal": "Use the step signal as evidence that the listener is moving and can handle a stronger intervention.",
+                "user_profile": {
+                    "user_valence_pref": 0.10,
+                    "user_energy_pref": -0.10,
+                    "top_genres": ["indie", "pop", "ambient"],
                 },
             },
         ],
@@ -188,12 +258,15 @@ def recommend_case(hmm, agent, reward_model, library, case: dict) -> tuple[np.nd
         pre_emotion_mask=case["pre_emotion_mask"],
         user_valence_pref=case["user_profile"]["user_valence_pref"],
         user_energy_pref=case["user_profile"]["user_energy_pref"],
+        step_mean=case.get("step_mean", 0.0),
+        step_nonzero_frac=case.get("step_nonzero_frac", 0.0),
     )
     action = int(agent.greedy_action(state))
     components = reward_model.expected_components(
         int(np.argmax(belief)),
         int(case["time_bucket"]),
         int(activity_remapped),
+        int(case.get("step_active", 0)),
         action,
         pre_valence=float(case["pre_valence"]),
         pre_arousal=float(case["pre_arousal"]),
@@ -231,7 +304,8 @@ def main() -> None:
             print(
                 f"Context: hr={case['hr_mean']:<5.1f} intensity={case['intensity']:<4} "
                 f"activity={ACTIVITY_LABELS[activity_remapped]:<13} "
-                f"time={TIME_LABELS[case['time_bucket']]:<9} weather={case['weather_bucket']} speed={case['gps_speed']:.1f}"
+                f"time={TIME_LABELS[case['time_bucket']]:<9} weather={case['weather_bucket']} "
+                f"speed={case['gps_speed']:.1f} step_active={int(case.get('step_active', 0))}"
             )
             print(
                 f"Mood:    pre_valence={case['pre_valence']:+.2f} "
@@ -257,9 +331,10 @@ def main() -> None:
             print("Tracks:")
             for _, track in tracks.iterrows():
                 soft_tag = " soft" if bool(track["bucket_is_soft"]) else ""
+                explanation = f" | {track['dynamic_reason']}" if str(track.get("dynamic_reason", "")) else ""
                 print(
                     f"  - {track['track_name']} / {track['artist']} "
-                    f"[{track['source']}{soft_tag}, score={track['score']:.2f}]"
+                    f"[{track['source']}{soft_tag}, score={track['score']:.2f}]{explanation}"
                 )
 
     print("\n" + "=" * 92)

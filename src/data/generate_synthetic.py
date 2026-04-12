@@ -128,9 +128,12 @@ def make_synthetic_rows(
                 pre_emotion_mask=0.0,
                 user_valence_pref=float(template.get("user_valence_pref", 0.0)),
                 user_energy_pref=float(template.get("user_energy_pref", 0.0)),
+                step_mean=float(template.get("step_mean", 0.0)),
+                step_nonzero_frac=float(template.get("step_nonzero_frac", 0.0)),
             )
 
             action = int(rng.choice(8, p=action_probs))
+            step_active = int(template.get("step_active", 0))
 
             source_for_mood = real_by_state.get(hmm_state, train_df)
             mood_seed = source_for_mood.sample(1, random_state=int(rng.integers(0, 1_000_000))).iloc[0]
@@ -138,6 +141,7 @@ def make_synthetic_rows(
                 hmm_state,
                 current_time,
                 activity,
+                step_active,
                 action,
                 pre_valence=float(mood_seed["emo_pre_valence"]),
                 pre_arousal=float(mood_seed["emo_pre_arousal"]),
@@ -146,6 +150,7 @@ def make_synthetic_rows(
                 hmm_state,
                 current_time,
                 activity,
+                step_active,
                 action,
                 pre_valence=float(mood_seed["emo_pre_valence"]),
                 pre_arousal=float(mood_seed["emo_pre_arousal"]),
@@ -199,6 +204,9 @@ def make_synthetic_rows(
                     "user_hr_baseline_std": float(template.get("user_hr_baseline_std", 0.0)),
                     "hr_mean_rel_user": float(template.get("hr_mean_rel_user", 0.0)),
                     "hr_std_rel_user": float(template.get("hr_std_rel_user", 0.0)),
+                    "step_mean": float(template.get("step_mean", 0.0)),
+                    "step_nonzero_frac": float(template.get("step_nonzero_frac", 0.0)),
+                    "step_active": step_active,
                     "weather_bucket": int(template.get("weather_bucket", 1)),
                     "gps_speed": float(template.get("gps_speed", 0.0)),
                     "dataset_stage": "synthetic",
@@ -236,6 +244,8 @@ def make_synthetic_rows(
         "activity_distribution_synth": synthetic_df["activity_majority"].value_counts(normalize=True).sort_index().to_dict(),
         "time_distribution_real": train_df["time_bucket"].value_counts(normalize=True).sort_index().to_dict(),
         "time_distribution_synth": synthetic_df["time_bucket"].value_counts(normalize=True).sort_index().to_dict(),
+        "step_active_real": train_df["step_active"].value_counts(normalize=True).sort_index().to_dict(),
+        "step_active_synth": synthetic_df["step_active"].value_counts(normalize=True).sort_index().to_dict(),
         "reward_distribution_real": train_df["reward"].value_counts(normalize=True).sort_index().to_dict(),
         "reward_distribution_synth": synthetic_df["reward"].value_counts(normalize=True).sort_index().to_dict(),
         "belief_entropy_real_mean": float(real_entropy.mean()),

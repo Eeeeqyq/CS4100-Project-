@@ -1,5 +1,5 @@
 """
-Precompute corrected HMM beliefs and 14D state vectors for all splits.
+Precompute corrected HMM beliefs and 16D state vectors for all splits.
 """
 
 from __future__ import annotations
@@ -45,6 +45,8 @@ def main() -> None:
             pre_emotion_mask=float(row.get("pre_emotion_mask", 1.0)),
             user_valence_pref=float(row.get("user_valence_pref", 0.0)),
             user_energy_pref=float(row.get("user_energy_pref", 0.0)),
+            step_mean=float(row.get("step_mean", 0.0)),
+            step_nonzero_frac=float(row.get("step_nonzero_frac", 0.0)),
         )
 
     np.save(PROCESSED_DIR / "belief_states.npy", beliefs)
