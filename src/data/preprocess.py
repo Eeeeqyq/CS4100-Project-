@@ -1,8 +1,8 @@
 """
 Deterministic preprocessing pipeline for SiTunes, PMEmo, and Spotify.
 
-This script is the canonical data build entrypoint. Notebooks are optional
-for exploration, but all repo-tracked logic lives here.
+This script is the canonical data build entrypoint for the legacy pipeline.
+All repo-tracked preprocessing logic lives here.
 """
 
 from __future__ import annotations

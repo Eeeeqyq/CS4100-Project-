@@ -708,25 +708,11 @@ Important caveat:
 - the final `v2.2` story should still be read from the offline end-to-end evaluation below
 - the reranker-internal acceptance MAE is slightly weaker than the final top-ranked blended acceptance MAE reported by the end-to-end evaluator
 
-### Experimental Step - Tune the `v2` final rank score
-
-```bash
-python src/v2/eval/tune_final_ranker.py --candidate-k 50
-```
-
-This is now a secondary diagnostic utility, not part of the primary `v2.2` contract.
-
 The current rebuilt path does **not** depend on the older source-biased mixed-catalog final scorer. The live `v2.2` recommender instead uses:
 
 - anchor retrieval
 - anchor reranking
 - anchor-conditioned public transfer scoring
-
-This script remains in the repo for validation-side experiments and legacy comparisons.
-
-It writes, when used:
-
-- `models/rebuild/final_ranker_config.json`
 
 Important caveat:
 

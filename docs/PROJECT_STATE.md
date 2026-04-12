@@ -494,13 +494,11 @@ Current commands:
 - `python src/v2/inference/recommend.py --split test --limit 3 --top-k 5 --candidate-k 50 --explicit-goal focus`
 - `python src/v2/eval/offline_eval.py --split test --candidate-k 50`
 - `python src/v2/eval/check_readiness.py`
-- `python src/v2/eval/tune_final_ranker.py`
 
 Generated artifacts:
 
 - `models/rebuild/offline_eval_v2.json`
 - `models/rebuild/v2_readiness.json`
-- `models/rebuild/transfer_threshold_tuning.json`
 - `data/processed/rebuild/offline_eval_v2_predictions.parquet`
 
 Last verified end-to-end test result from `models/rebuild/offline_eval_v2.json`:
