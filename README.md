@@ -18,6 +18,41 @@ For presentation prep and an end-to-end explanation of the rebuilt path, see `do
 
 ---
 
+## Quick Start For `v2.2`
+
+If you are new to the repo and only want to run the rebuilt `v2.2` system, use this section.
+
+### Fastest path if rebuilt artifacts already exist
+
+```bash
+python eval_v2.py --no-rerun
+python demo_v2.py
+```
+
+Use this when you want to inspect the latest verified `v2.2` results and presentation demo without retraining anything.
+
+### Full fresh `v2.2` rebuild
+
+```bash
+python train_v2.py
+python eval_v2.py
+python demo_v2.py
+```
+
+What each command does:
+
+- `train_v2.py`: runs the full rebuilt training and evaluation stack
+- `eval_v2.py`: prints the current offline summary and readiness result
+- `demo_v2.py`: shows a presentation-friendly goal-conditioned recommendation demo
+
+Important notes:
+
+- `train_v2.py` expects the raw datasets to exist under the paths listed in the Setup section below
+- `train_v2.py` is the expensive path; use `eval_v2.py --no-rerun` and `demo_v2.py` if you only need the latest saved outputs
+- the legacy HMM + DQN pipeline is still in the repo, but it is separate from the `v2.2` commands above
+
+---
+
 ## The Problem
 
 Spotify and Apple Music know what you liked last week. They do not know that you are tense at 2pm, low-energy in the evening, or trying to stay focused during a study block. Most recommenders ignore the most relevant signal: how you feel right now.
