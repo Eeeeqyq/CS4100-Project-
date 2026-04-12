@@ -1,8 +1,8 @@
 """
 Deterministic preprocessing pipeline for SiTunes, PMEmo, and Spotify.
 
-This script is the canonical data build entrypoint. Notebooks are optional
-for exploration, but all repo-tracked logic lives here.
+This script is the canonical data build entrypoint for the legacy pipeline.
+All repo-tracked preprocessing logic lives here.
 """
 
 from __future__ import annotations
@@ -400,6 +400,13 @@ def clean_situnes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFr
             "bucket_distribution": combined["action_bucket"].value_counts().sort_index().to_dict(),
             "time_distribution": combined["time_bucket"].value_counts().sort_index().to_dict(),
             "activity_distribution": combined["activity_majority"].value_counts().sort_index().to_dict(),
+            "step_active_rate": float(combined["step_active"].mean()),
+            "step_mean_summary": {
+                "mean": float(combined["step_mean"].mean()),
+                "std": float(combined["step_mean"].std(ddof=0)),
+                "min": float(combined["step_mean"].min()),
+                "max": float(combined["step_mean"].max()),
+            },
             "hr_mean_summary": {
                 "mean": float(combined["hr_mean"].mean()),
                 "std": float(combined["hr_mean"].std(ddof=0)),
@@ -494,6 +501,77 @@ def compute_pmemo_eda_impact() -> dict[int, float]:
     return {music_id: float((value - lo) / denom) for music_id, value in scores.items()}
 
 
+def compute_pmemo_dynamic_features() -> pd.DataFrame:
+    dynamic_path = PMEMO_DIR / "annotations" / "dynamic_annotations.csv"
+    dynamic_std_path = PMEMO_DIR / "annotations" / "dynamic_annotations_std.csv"
+    if not dynamic_path.exists():
+        return pd.DataFrame(
+            columns=[
+                "musicId",
+                "dyn_valence_start",
+                "dyn_valence_end",
+                "dyn_arousal_start",
+                "dyn_arousal_end",
+                "dyn_valence_delta",
+                "dyn_arousal_delta",
+                "dyn_valence_volatility",
+                "dyn_arousal_volatility",
+                "dyn_arousal_peak",
+                "dyn_quality",
+            ]
+        )
+
+    dynamic = pd.read_csv(
+        dynamic_path,
+        usecols=["musicId", "frameTime", "Arousal(mean)", "Valence(mean)"],
+    ).sort_values(["musicId", "frameTime"])
+    grouped = dynamic.groupby("musicId", sort=True)
+    features = grouped.agg(
+        dyn_valence_start=("Valence(mean)", "first"),
+        dyn_valence_end=("Valence(mean)", "last"),
+        dyn_arousal_start=("Arousal(mean)", "first"),
+        dyn_arousal_end=("Arousal(mean)", "last"),
+        dyn_valence_volatility=("Valence(mean)", lambda s: float(np.std(s.to_numpy(dtype=np.float64), ddof=0))),
+        dyn_arousal_volatility=("Arousal(mean)", lambda s: float(np.std(s.to_numpy(dtype=np.float64), ddof=0))),
+        dyn_arousal_peak=("Arousal(mean)", "max"),
+    ).reset_index()
+    features["dyn_valence_delta"] = features["dyn_valence_end"] - features["dyn_valence_start"]
+    features["dyn_arousal_delta"] = features["dyn_arousal_end"] - features["dyn_arousal_start"]
+
+    if dynamic_std_path.exists():
+        dynamic_std = pd.read_csv(
+            dynamic_std_path,
+            usecols=["musicId", "frameTime", "Arousal(std)", "Valence(std)"],
+        )
+        uncertainty = (
+            dynamic_std.assign(
+                dyn_uncertainty=dynamic_std[["Arousal(std)", "Valence(std)"]]
+                .mean(axis=1)
+                .astype(np.float64)
+            )
+            .groupby("musicId", sort=True)["dyn_uncertainty"]
+            .mean()
+            .reset_index()
+        )
+        values = uncertainty["dyn_uncertainty"].to_numpy(dtype=np.float64)
+        if len(values):
+            lo = float(np.nanmin(values))
+            hi = float(np.nanmax(values))
+            if hi - lo > 1e-8:
+                uncertainty["dyn_quality"] = 1.0 - (uncertainty["dyn_uncertainty"] - lo) / (hi - lo)
+            else:
+                uncertainty["dyn_quality"] = 0.5
+            uncertainty["dyn_quality"] = uncertainty["dyn_quality"].clip(0.0, 1.0)
+        else:
+            uncertainty["dyn_quality"] = 0.5
+        features = features.merge(uncertainty[["musicId", "dyn_quality"]], on="musicId", how="left")
+    else:
+        features["dyn_quality"] = 0.5
+
+    features["dyn_quality"] = features["dyn_quality"].fillna(0.5).astype(float)
+    return features
+
+
 def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     static = pd.read_csv(
         PMEMO_DIR / "annotations" / "static_annotations.csv",
@@ -504,6 +582,7 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         usecols=["musicId", "Arousal(std)", "Valence(std)"],
     )
     metadata = pd.read_csv(PMEMO_DIR / "metadata.csv")
+    dynamic_features = compute_pmemo_dynamic_features()
 
     common_feature_cols = [
         "musicId",
@@ -525,6 +604,7 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         static.merge(static_std, on="musicId", how="inner")
         .merge(metadata[["musicId", "title", "artist", "album", "duration"]], on="musicId", how="left")
         .merge(pmemo_features, on="musicId", how="inner")
+        .merge(dynamic_features, on="musicId", how="left")
     )
     merged = merged[merged["Valence(std)"] <= PIPELINE_CONFIG["pmemo_std_cutoff"]].copy()
     merged["valence_01"] = merged["Valence(mean)"].clip(0.01, 0.99)
@@ -575,6 +655,20 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     eda_impact = compute_pmemo_eda_impact()
     merged["eda_impact"] = merged["musicId"].map(eda_impact).fillna(0.0)
+    for column, default in [
+        ("dyn_valence_start", 0.0),
+        ("dyn_valence_end", 0.0),
+        ("dyn_arousal_start", 0.0),
+        ("dyn_arousal_end", 0.0),
+        ("dyn_valence_delta", 0.0),
+        ("dyn_arousal_delta", 0.0),
+        ("dyn_valence_volatility", 0.0),
+        ("dyn_arousal_volatility", 0.0),
+        ("dyn_arousal_peak", 0.0),
+        ("dyn_quality", 0.5),
+    ]:
+        merged[column] = merged.get(column, default)
+        merged[column] = merged[column].fillna(default)
 
     out = merged.rename(columns={"musicId": "song_id"})[
         [
@@ -593,6 +687,16 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
             "bucket_hint",
             "bucket_is_soft",
             "eda_impact",
+            "dyn_valence_start",
+            "dyn_valence_end",
+            "dyn_arousal_start",
+            "dyn_arousal_end",
+            "dyn_valence_delta",
+            "dyn_arousal_delta",
+            "dyn_valence_volatility",
+            "dyn_arousal_volatility",
+            "dyn_arousal_peak",
+            "dyn_quality",
         ]
     ].copy()
     out["source"] = "pmemo"
@@ -602,6 +706,7 @@ def clean_pmemo(situnes_music: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
             "rows": int(len(out)),
             "bucket_distribution": out["bucket_hint"].value_counts().sort_index().to_dict(),
             "eda_coverage": int((out["eda_impact"] > 0).sum()),
+            "dynamic_coverage": int((out["dyn_quality"] > 0).sum()),
             "transfer_models": {
                 "energy": {
                     "r2_train": round(float(energy_meta["r2_train"]), 4),

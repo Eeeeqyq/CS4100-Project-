@@ -55,6 +55,11 @@ class MusicLibrary:
                     "bucket_hint": situnes.get("bucket_hint", situnes["action_bucket"]).astype(int),
                     "bucket_is_soft": situnes.get("bucket_is_soft", False),
                     "eda_impact": situnes.get("eda_impact", 0.0),
+                    "dyn_valence_delta": 0.0,
+                    "dyn_arousal_delta": 0.0,
+                    "dyn_arousal_volatility": 0.0,
+                    "dyn_arousal_peak": 0.0,
+                    "dyn_quality": 0.0,
                     "source": "situnes",
                     "explicit": False,
                 }
@@ -82,6 +87,11 @@ class MusicLibrary:
                         "bucket_hint": pmemo.get("bucket_hint", pmemo["action_bucket"]).astype(int),
                         "bucket_is_soft": pmemo.get("bucket_is_soft", True),
                         "eda_impact": pmemo.get("eda_impact", 0.0),
+                        "dyn_valence_delta": pmemo.get("dyn_valence_delta", 0.0),
+                        "dyn_arousal_delta": pmemo.get("dyn_arousal_delta", 0.0),
+                        "dyn_arousal_volatility": pmemo.get("dyn_arousal_volatility", 0.0),
+                        "dyn_arousal_peak": pmemo.get("dyn_arousal_peak", 0.0),
+                        "dyn_quality": pmemo.get("dyn_quality", 0.5),
                         "source": "pmemo",
                         "explicit": False,
                     }
@@ -109,6 +119,11 @@ class MusicLibrary:
                         "bucket_hint": spotify.get("bucket_hint", spotify["action_bucket"]).astype(int),
                         "bucket_is_soft": spotify.get("bucket_is_soft", False),
                         "eda_impact": spotify.get("eda_impact", 0.0),
+                        "dyn_valence_delta": 0.0,
+                        "dyn_arousal_delta": 0.0,
+                        "dyn_arousal_volatility": 0.0,
+                        "dyn_arousal_peak": 0.0,
+                        "dyn_quality": 0.0,
                         "source": "spotify",
                         "explicit": spotify.get("explicit", False),
                     }
@@ -156,7 +171,50 @@ class MusicLibrary:
         text = str(genre).lower()
         return sum(0.12 for keyword in profile.get("top_genres", []) if keyword.lower() in text)
 
-    def _score_tracks(self, bucket: int, mode: str, context: dict | None = None) -> pd.Series:
+    @staticmethod
+    def _pmemo_dynamic_bonus(pool: pd.DataFrame, mode: str) -> pd.Series:
+        bonus = pd.Series(np.zeros(len(pool), dtype=np.float64), index=pool.index)
+        mask = pool["source"].eq("pmemo")
+        if not mask.any():
+            return bonus
+
+        sub = pool.loc[mask]
+        q = np.clip(sub["dyn_quality"].to_numpy(dtype=np.float64), 0.0, 1.0)
+        valence_rise = np.clip(sub["dyn_valence_delta"].to_numpy(dtype=np.float64) / 0.10, 0.0, 1.0)
+        arousal_rise = np.clip(sub["dyn_arousal_delta"].to_numpy(dtype=np.float64) / 0.10, 0.0, 1.0)
+        arousal_fall = np.clip(-sub["dyn_arousal_delta"].to_numpy(dtype=np.float64) / 0.10, 0.0, 1.0)
+        arousal_peak_norm = np.clip((sub["dyn_arousal_peak"].to_numpy(dtype=np.float64) - 0.20) / 0.80, 0.0, 1.0)
+        arousal_stability = 1.0 - np.clip(sub["dyn_arousal_volatility"].to_numpy(dtype=np.float64) / 0.05, 0.0, 1.0)
+
+        if mode == "focus":
+            values = q * (0.10 * arousal_stability + 0.06 * (1.0 - arousal_peak_norm) + 0.04 * arousal_fall)
+        elif mode == "wind_down":
+            values = q * (0.12 * arousal_fall + 0.06 * (1.0 - arousal_peak_norm) + 0.06 * arousal_stability)
+        elif mode == "exercise":
+            values = q * (0.10 * arousal_rise + 0.08 * arousal_peak_norm + 0.04 * valence_rise)
+        elif mode == "exercise-lite":
+            values = q * (0.08 * arousal_rise + 0.05 * arousal_peak_norm + 0.03 * valence_rise)
+        else:
+            values = q * (0.10 * valence_rise + 0.05 * arousal_rise + 0.03 * arousal_stability)
+
+        bonus.loc[mask] = np.clip(values, 0.0, 0.18)
+        return bonus
+
+    @staticmethod
+    def _pmemo_dynamic_reason(row: pd.Series, mode: str) -> str:
+        if str(row.get("source", "")) != "pmemo":
+            return ""
+        if float(row.get("dynamic_bonus", 0.0)) <= 0.01:
+            return ""
+        if mode == "focus":
+            return "stable low-volatility contour"
+        if mode == "wind_down":
+            return "gentle calming trajectory"
+        if mode in {"exercise", "exercise-lite"}:
+            return "rising arousal trajectory"
+        return "positive rising trajectory"
+
+    def _score_tracks(self, bucket: int, mode: str, context: dict | None = None) -> tuple[pd.Series, pd.Series]:
         target = bucket_targets(bucket)
         user_profile = self._resolve_user_profile(context or {})
         pool = self.df.copy()
@@ -201,8 +259,10 @@ class MusicLibrary:
 
         score += pool["genre"].map(lambda text: self._genre_bonus(text, mode))
         score += 0.18 * pool["eda_impact"]
+        dynamic_bonus = self._pmemo_dynamic_bonus(pool, mode)
+        score += dynamic_bonus
         score += pool["source"].map({"situnes": 0.10, "pmemo": 0.04, "spotify": 0.0}).fillna(0.0)
-        return score
+        return score, dynamic_bonus
 
     def get_tracks(
         self,
@@ -218,14 +278,24 @@ class MusicLibrary:
         if pool.empty:
             return pd.DataFrame()
 
-        score = self._score_tracks(bucket, mode, context=context if isinstance(context, dict) else {"mode": mode})
-        pool = pool.assign(score=score.loc[pool.index].to_numpy())
+        score, dynamic_bonus = self._score_tracks(
+            bucket,
+            mode,
+            context=context if isinstance(context, dict) else {"mode": mode},
+        )
+        pool = pool.assign(
+            score=score.loc[pool.index].to_numpy(),
+            dynamic_bonus=dynamic_bonus.loc[pool.index].to_numpy(),
+        )
         pool = pool.sort_values(
             ["score", "popularity", "track_name", "artist"],
             ascending=[False, False, True, True],
             kind="mergesort",
         )
-        return pool.head(n)[
+        pool = pool.drop_duplicates(subset=["track_name", "artist"], keep="first")
+        result = pool.head(n).copy()
+        result["dynamic_reason"] = result.apply(lambda row: self._pmemo_dynamic_reason(row, mode), axis=1)
+        return result[
             [
                 "track_name",
                 "artist",
@@ -239,6 +309,8 @@ class MusicLibrary:
                 "source",
                 "popularity",
                 "eda_impact",
+                "dynamic_bonus",
+                "dynamic_reason",
                 "score",
             ]
         ].reset_index(drop=True)

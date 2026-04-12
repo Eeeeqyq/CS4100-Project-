@@ -34,6 +34,11 @@ SEED = 42
 def load_real_data() -> tuple[pd.DataFrame, np.ndarray]:
     df = pd.read_csv(PROCESSED_DIR / "interactions_clean.csv")
     states = np.load(PROCESSED_DIR / "state_vectors.npy")
+    if "step_active" not in df.columns:
+        if "step_nonzero_frac" in df.columns:
+            df["step_active"] = (df["step_nonzero_frac"].astype(float) >= 0.05).astype(int)
+        else:
+            df["step_active"] = 0
     df["hmm_state"] = states[:, :3].argmax(axis=1)
     df["belief_0"] = states[:, 0]
     df["belief_1"] = states[:, 1]
@@ -49,6 +54,11 @@ def load_synthetic() -> tuple[pd.DataFrame | None, np.ndarray | None]:
         return None, None
     df = pd.read_csv(syn_csv)
     states = np.load(syn_npy)
+    if "step_active" not in df.columns:
+        if "step_nonzero_frac" in df.columns:
+            df["step_active"] = (df["step_nonzero_frac"].astype(float) >= 0.05).astype(int)
+        else:
+            df["step_active"] = 0
     if "hmm_state" not in df.columns:
         df["hmm_state"] = states[:, :3].argmax(axis=1)
     if "is_synthetic" not in df.columns:
@@ -90,6 +100,7 @@ def evaluate_policy(
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
+                int(row.get("step_active", 0)),
                 bucket,
                 pre_valence=float(row.get("emo_pre_valence", 0.0)),
                 pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
@@ -107,6 +118,7 @@ def evaluate_policy(
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
+                int(row.get("step_active", 0)),
                 int(action),
                 pre_valence=float(row.get("emo_pre_valence", 0.0)),
                 pre_arousal=float(row.get("emo_pre_arousal", 0.0)),
@@ -152,16 +164,24 @@ def baseline_actions_state_prior(
 ) -> np.ndarray:
     state_best = {}
     for hmm_state in range(3):
-        scores = []
-        subset = train_df[train_df["hmm_state"] == hmm_state]
-        if subset.empty:
-            subset = train_df
-        time_mode = int(subset["time_bucket"].mode().iloc[0])
-        activity_mode = int(subset["activity_majority"].mode().iloc[0])
-        for action in range(8):
-            scores.append(reward_model.expected_reward(hmm_state, time_mode, activity_mode, action))
-        state_best[hmm_state] = int(np.argmax(scores))
-    return df["hmm_state"].map(state_best).to_numpy(dtype=np.int32)
+        subset_state = train_df[train_df["hmm_state"] == hmm_state]
+        if subset_state.empty:
+            subset_state = train_df
+        for step_active in [0, 1]:
+            subset = subset_state[subset_state["step_active"] == step_active]
+            if subset.empty:
+                subset = subset_state
+            time_mode = int(subset["time_bucket"].mode().iloc[0])
+            activity_mode = int(subset["activity_majority"].mode().iloc[0])
+            scores = [
+                reward_model.expected_reward(hmm_state, time_mode, activity_mode, step_active, action)
+                for action in range(8)
+            ]
+            state_best[(hmm_state, step_active)] = int(np.argmax(scores))
+    return np.asarray(
+        [state_best[(int(row["hmm_state"]), int(row.get("step_active", 0)))] for _, row in df.iterrows()],
+        dtype=np.int32,
+    )
 
 
 def train(args: argparse.Namespace) -> None:
@@ -310,6 +330,7 @@ def train(args: argparse.Namespace) -> None:
                 int(row["hmm_state"]),
                 int(row["time_bucket"]),
                 int(row["activity_majority"]),
+                int(row.get("step_active", 0)),
                 action,
                 pre_valence=float(row.get("emo_pre_valence", 0.0)),
                 pre_arousal=float(row.get("emo_pre_arousal", 0.0)),

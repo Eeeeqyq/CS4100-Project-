@@ -62,7 +62,7 @@ class HierarchicalRewardModel:
         self,
         k_action: float = 32.0,
         k_affect: float = 18.0,
-        k_full: float = 10.0,
+        k_full: float = 12.0,
         alpha: float = DEFAULT_EMOTION_WEIGHT,
         beta: float = DEFAULT_ACCEPTANCE_WEIGHT,
         preference_blend: float = 0.35,
@@ -79,12 +79,12 @@ class HierarchicalRewardModel:
         self.global_counts = np.ones(3, dtype=np.float64)
         self.action_counts: dict[int, np.ndarray] = {}
         self.affect_action_counts: dict[tuple[int, int, int, int], np.ndarray] = {}
-        self.full_counts: dict[tuple[int, int, int, int, int, int], np.ndarray] = {}
+        self.full_counts: dict[tuple[int, int, int, int, int, int, int], np.ndarray] = {}
 
         self.global_summary = _blank_summary()
         self.action_summary: dict[int, dict[str, float]] = {}
         self.affect_action_summary: dict[tuple[int, int, int, int], dict[str, float]] = {}
-        self.full_summary: dict[tuple[int, int, int, int, int, int], dict[str, float]] = {}
+        self.full_summary: dict[tuple[int, int, int, int, int, int, int], dict[str, float]] = {}
 
         self.delta_stats = {}
         self.metadata = {}
@@ -134,18 +134,25 @@ class HierarchicalRewardModel:
         return int(hmm_state), valence_bin(float(pre_valence)), arousal_bin(float(pre_arousal)), int(action)
 
     @staticmethod
+    def step_bin(step_active: int | float) -> int:
+        return int(bool(step_active))
+
+    @classmethod
     def _full_key(
+        cls,
         hmm_state: int,
         time_bucket: int,
         activity: int,
+        step_active: int | float,
         pre_valence: float,
         pre_arousal: float,
         action: int,
-    ) -> tuple[int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int]:
         return (
             int(hmm_state),
             int(time_bucket),
             int(activity),
+            cls.step_bin(step_active),
             valence_bin(float(pre_valence)),
             arousal_bin(float(pre_arousal)),
             int(action),
@@ -165,6 +172,11 @@ class HierarchicalRewardModel:
         missing = [col for col in required if col not in work.columns]
         if missing:
             raise ValueError(f"Reward model fit missing columns: {missing}")
+        if "step_active" not in work.columns:
+            if "step_nonzero_frac" in work.columns:
+                work["step_active"] = (work["step_nonzero_frac"].astype(float) >= 0.05).astype(int)
+            else:
+                work["step_active"] = 0
 
         if "emotion_benefit" not in work.columns:
             work["emotion_benefit"] = work["reward_score"].map(emotional_benefit)
@@ -194,13 +206,14 @@ class HierarchicalRewardModel:
             hmm_state = int(row["hmm_state"])
             time_bucket = int(row["time_bucket"])
             activity = int(row["activity_majority"])
+            step_active = self.step_bin(row.get("step_active", 0))
             emotion_value = float(row["emotion_benefit"])
             acceptance_value = float(row["acceptance_score"])
             pre_valence = float(row["emo_pre_valence"])
             pre_arousal = float(row["emo_pre_arousal"])
 
             affect_key = self._affect_key(hmm_state, pre_valence, pre_arousal, action)
-            full_key = self._full_key(hmm_state, time_bucket, activity, pre_valence, pre_arousal, action)
+            full_key = self._full_key(hmm_state, time_bucket, activity, step_active, pre_valence, pre_arousal, action)
 
             self.global_counts[reward_idx] += 1.0
             self.action_counts.setdefault(action, np.ones(3, dtype=np.float64))[reward_idx] += 1.0
@@ -233,6 +246,7 @@ class HierarchicalRewardModel:
             "alpha": self.alpha,
             "beta": self.beta,
             "preference_blend": self.preference_blend,
+            "uses_step_active": True,
             "emotion_benefit_mean": float(work["emotion_benefit"].mean()),
             "acceptance_score_mean": float(work["acceptance_score"].mean()),
             "combined_reward_mean": float(work["combined_reward"].mean()),
@@ -244,6 +258,7 @@ class HierarchicalRewardModel:
         hmm_state: int,
         time_bucket: int,
         activity: int,
+        step_active: int | float,
         action: int,
         pre_valence: float = 0.0,
         pre_arousal: float = 0.0,
@@ -256,7 +271,9 @@ class HierarchicalRewardModel:
             self.k_affect,
         )
         probs = self._blend(
-            self.full_counts.get(self._full_key(hmm_state, time_bucket, activity, pre_valence, pre_arousal, action)),
+            self.full_counts.get(
+                self._full_key(hmm_state, time_bucket, activity, step_active, pre_valence, pre_arousal, action)
+            ),
             affect_probs,
             self.k_full,
         )
@@ -269,6 +286,7 @@ class HierarchicalRewardModel:
         hmm_state: int,
         time_bucket: int,
         activity: int,
+        step_active: int | float,
         action: int,
         pre_valence: float = 0.0,
         pre_arousal: float = 0.0,
@@ -285,7 +303,9 @@ class HierarchicalRewardModel:
 
         action_summary = self.action_summary.get(int(action))
         affect_summary = self.affect_action_summary.get(self._affect_key(hmm_state, pre_valence, pre_arousal, action))
-        full_summary = self.full_summary.get(self._full_key(hmm_state, time_bucket, activity, pre_valence, pre_arousal, action))
+        full_summary = self.full_summary.get(
+            self._full_key(hmm_state, time_bucket, activity, step_active, pre_valence, pre_arousal, action)
+        )
 
         emotion = self._blend_mean(action_summary, global_emotion, "emotion_sum", self.k_action)
         emotion = self._blend_mean(affect_summary, emotion, "emotion_sum", self.k_affect)
@@ -319,6 +339,7 @@ class HierarchicalRewardModel:
         hmm_state: int,
         time_bucket: int,
         activity: int,
+        step_active: int | float,
         action: int,
         pre_valence: float = 0.0,
         pre_arousal: float = 0.0,
@@ -329,6 +350,7 @@ class HierarchicalRewardModel:
             hmm_state,
             time_bucket,
             activity,
+            step_active,
             action,
             pre_valence=pre_valence,
             pre_arousal=pre_arousal,
@@ -341,17 +363,19 @@ class HierarchicalRewardModel:
         hmm_state: int,
         time_bucket: int,
         activity: int,
+        step_active: int | float,
         action: int,
         pre_valence: float = 0.0,
         pre_arousal: float = 0.0,
     ) -> float:
-        return float(self.probs(hmm_state, time_bucket, activity, action, pre_valence, pre_arousal)[2])
+        return float(self.probs(hmm_state, time_bucket, activity, step_active, action, pre_valence, pre_arousal)[2])
 
     def sample_reward(
         self,
         hmm_state: int,
         time_bucket: int,
         activity: int,
+        step_active: int | float,
         action: int,
         pre_valence: float = 0.0,
         pre_arousal: float = 0.0,
@@ -359,7 +383,7 @@ class HierarchicalRewardModel:
         return int(
             self.rng.choice(
                 [-1, 0, 1],
-                p=self.probs(hmm_state, time_bucket, activity, action, pre_valence, pre_arousal),
+                p=self.probs(hmm_state, time_bucket, activity, step_active, action, pre_valence, pre_arousal),
             )
         )
 
@@ -382,20 +406,29 @@ class HierarchicalRewardModel:
             "action_counts": {str(k): v.tolist() for k, v in self.action_counts.items()},
             "affect_action_counts": {f"{k[0]}|{k[1]}|{k[2]}|{k[3]}": v.tolist() for k, v in self.affect_action_counts.items()},
             "full_counts": {
-                f"{k[0]}|{k[1]}|{k[2]}|{k[3]}|{k[4]}|{k[5]}": v.tolist()
+                f"{k[0]}|{k[1]}|{k[2]}|{k[3]}|{k[4]}|{k[5]}|{k[6]}": v.tolist()
                 for k, v in self.full_counts.items()
             },
             "global_summary": self.global_summary,
             "action_summary": {str(k): v for k, v in self.action_summary.items()},
             "affect_action_summary": {f"{k[0]}|{k[1]}|{k[2]}|{k[3]}": v for k, v in self.affect_action_summary.items()},
             "full_summary": {
-                f"{k[0]}|{k[1]}|{k[2]}|{k[3]}|{k[4]}|{k[5]}": v
+                f"{k[0]}|{k[1]}|{k[2]}|{k[3]}|{k[4]}|{k[5]}|{k[6]}": v
                 for k, v in self.full_summary.items()
             },
             "delta_stats": self.delta_stats,
             "metadata": self.metadata,
         }
         Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    @classmethod
+    def _parse_full_key_text(cls, text: str) -> tuple[int, int, int, int, int, int, int]:
+        pieces = tuple(int(piece) for piece in text.split("|"))
+        if len(pieces) == 7:
+            return pieces
+        if len(pieces) == 6:
+            return (pieces[0], pieces[1], pieces[2], 0, pieces[3], pieces[4], pieces[5])
+        raise ValueError(f"Unexpected full key format: {text}")
 
     @classmethod
     def load(cls, path: str | Path) -> "HierarchicalRewardModel":
@@ -417,7 +450,7 @@ class HierarchicalRewardModel:
             for k, v in payload.get("affect_action_counts", {}).items()
         }
         model.full_counts = {
-            tuple(int(piece) for piece in k.split("|")): np.asarray(v, dtype=np.float64)
+            cls._parse_full_key_text(k): np.asarray(v, dtype=np.float64)
             for k, v in payload["full_counts"].items()
         }
         model.global_summary = payload.get("global_summary", _blank_summary())
@@ -427,7 +460,7 @@ class HierarchicalRewardModel:
             for k, v in payload.get("affect_action_summary", {}).items()
         }
         model.full_summary = {
-            tuple(int(piece) for piece in k.split("|")): v
+            cls._parse_full_key_text(k): v
             for k, v in payload.get("full_summary", {}).items()
         }
         model.delta_stats = payload["delta_stats"]

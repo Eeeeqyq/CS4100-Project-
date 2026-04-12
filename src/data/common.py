@@ -25,7 +25,7 @@ SPOTIFY_DIR = RAW_DIR / "spotify_kaggle"
 
 N_HMM_STATES = 3
 N_WRIST_OBS = 60
-STATE_DIM = 14
+STATE_DIM = 16
 ACTION_DIM = 8
 
 DEFAULT_SEED = 42
@@ -132,6 +132,7 @@ def majority_vote(values: Iterable[int], tie_break: int) -> int:
 def summarize_wrist_session(wrist_session: np.ndarray) -> dict:
     heart_rate = wrist_session[:, 0].astype(float)
     intensities = wrist_session[:, 1].astype(float)
+    steps = wrist_session[:, 2].astype(float)
     activities_raw = wrist_session[:, 3].astype(int)
     activities = np.vectorize(lambda x: ACTIVITY_REMAP.get(int(x), 0))(activities_raw)
     encoded = encode_wrist_session(wrist_session)
@@ -148,6 +149,9 @@ def summarize_wrist_session(wrist_session: np.ndarray) -> dict:
     hr_min = float(np.min(heart_rate))
     hr_max = float(np.max(heart_rate))
     hr_last = float(heart_rate[-1])
+    step_mean = float(np.mean(steps))
+    step_nonzero_frac = float(np.mean(steps > 0.0))
+    step_active = int(step_nonzero_frac >= 0.05)
 
     return {
         "wrist_obs": encoded,
@@ -166,6 +170,10 @@ def summarize_wrist_session(wrist_session: np.ndarray) -> dict:
         "hr_last": hr_last,
         "hr_bucket_mean": hr_bucket(hr_mean),
         "hr_bucket_last": hr_bucket(hr_last),
+        # Step summaries are downstream context features, not HMM emissions.
+        "step_mean": step_mean,
+        "step_nonzero_frac": step_nonzero_frac,
+        "step_active": step_active,
     }
 
 
@@ -308,10 +316,14 @@ def state_vector_from_components(
     pre_emotion_mask: float | None = None,
     user_valence_pref: float = 0.0,
     user_energy_pref: float = 0.0,
+    step_mean: float = 0.0,
+    step_nonzero_frac: float = 0.0,
 ) -> np.ndarray:
     if pre_emotion_mask is None:
         pre_emotion_mask = 1.0 if (pre_valence is not None and pre_arousal is not None) else 0.0
 
+    # The HMM remains responsible only for coarse wrist-state belief; steps stay
+    # downstream as explicit context features for the policy.
     return np.asarray(
         [
             float(belief[0]),
@@ -328,6 +340,8 @@ def state_vector_from_components(
             _clip01(float(pre_emotion_mask)),
             _normalize_preference(user_valence_pref),
             _normalize_preference(user_energy_pref),
+            _clip01(float(step_mean) / 25.0),
+            _clip01(float(step_nonzero_frac)),
         ],
         dtype=np.float32,
     )
@@ -360,6 +374,11 @@ def track_quality_features(df: pd.DataFrame) -> pd.DataFrame:
         ("valence", 0.5),
         ("tempo", 120.0),
         ("eda_impact", 0.0),
+        ("dyn_valence_delta", 0.0),
+        ("dyn_arousal_delta", 0.0),
+        ("dyn_arousal_volatility", 0.0),
+        ("dyn_arousal_peak", 0.0),
+        ("dyn_quality", 0.0),
     ]:
         if column not in out.columns:
             out[column] = default
