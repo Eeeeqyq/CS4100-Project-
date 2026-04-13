@@ -15,6 +15,8 @@ It is written to answer four questions clearly:
 
 This report focuses on `v2.2`, not the legacy HMM + DQN grading pipeline. The old pipeline still exists in the repo for course compatibility, but the stronger research story is the rebuilt explicit-goal, anchor-first system under `src/v2/`.
 
+If you need the short 5-6 minute talk track rather than the full prep document, use `docs/PRESENTATION_SCRIPT.md`.
+
 ---
 
 ## Executive Summary
