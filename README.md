@@ -35,6 +35,50 @@ Use the original HMM + DQN pipeline only if you specifically want the older cour
 
 ---
 
+## Methods At A Glance
+
+The rebuilt `v2.2` system combines several AI methods, each chosen for a specific reason.
+
+| Method | What it does in `v2.2` | Why we used it |
+|--------|-------------------------|----------------|
+| **Sequence modeling** | encodes the wrist time series with a learned context model | wrist data is temporal, so a static average would throw away important information |
+| **Representation learning** | learns embeddings for context, users, and songs | the system needs a shared representation to compare current situations, historical anchors, and public songs |
+| **Anchor retrieval** | retrieves relevant historical SiTunes interventions | SiTunes is the only dataset with intervention-outcome supervision, so it should drive intervention quality |
+| **Multitask reranking** | predicts benefit, acceptance, and relevance for retrieved anchors | helpfulness and likability are different objectives, so we should not collapse them too early |
+| **Calibrated public transfer** | allows Spotify / PMEmo songs to outrank anchors only when support is strong enough | public catalogs are useful, but they are not directly labeled with intervention outcomes |
+| **Explicit-goal conditioning** | uses `focus`, `wind_down`, `uplift`, or `movement` as a direct input | the data is strong enough to support goal-conditioned recommendation, but not a strong claim about always inferring the user's goal automatically |
+
+### How the `v2.2` pipeline fits together
+
+1. **Context encoder**
+   - input: wrist sequence + environment + optional self-report
+   - output: context embedding
+2. **User encoder**
+   - input: Stage 1 taste history
+   - output: user embedding
+3. **Song encoder**
+   - input: song metadata/features and PMEmo dynamics where available
+   - output: song embedding
+4. **Query tower**
+   - input: context embedding + user embedding + explicit goal + target affect state
+   - output: query embedding used to retrieve SiTunes anchors
+5. **Reranker**
+   - input: retrieved anchor candidates
+   - output: predicted benefit, predicted acceptance, and anchor relevance
+6. **Transfer gate**
+   - input: anchor-conditioned support for public songs
+   - output: whether Spotify / PMEmo candidates are allowed to outrank anchors
+
+### Main logic behind the approach
+
+The main reasoning is:
+- learn intervention quality from **SiTunes**, because it is the only intervention-outcome dataset in the repo
+- use **Spotify** and **PMEmo** to widen the recommendation space, but only through controlled transfer
+- separate **benefit** from **acceptance**, because a song can be helpful but disliked, or liked but unhelpful
+- use **retrieval + reranking** instead of exact-song classification, because multiple historical anchors can be valid in similar contexts
+
+---
+
 ## Datasets
 
 | Dataset | Role | Size |
