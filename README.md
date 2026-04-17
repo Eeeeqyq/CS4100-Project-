@@ -3,15 +3,17 @@
 # Ambient Music Recommendation Agent
 ### CS4100 Artificial Intelligence - Northeastern University
 
-An AI system that recommends music based on the user's current biometrics, emotional state, environment, and baseline taste instead of only past listening history. A Hidden Markov Model (HMM) infers a coarse latent context-energy belief state from wrist sensor data, and a Deep Q-Network (DQN) chooses the music bucket most likely to help in the current situation. A deterministic retrieval layer then ranks concrete songs using the user's baseline preferences and track-level music-affect cues.
+An AI system that recommends music based on the user's current biometrics, emotional state, environment, and baseline taste instead of only past listening history.
 
 This project is intentionally built with from-scratch NumPy and PyTorch implementations for the core AI components. It does not use `hmmlearn`, `stable-baselines3`, or transformer-based models.
 
-A parallel experimental `v2.2` rebuild path also exists under `src/v2/`. It is separate from the graded HMM + DQN pipeline above. The rebuilt path is now explicit-goal, anchor-first, and transfer-aware:
+The current recommended system in this repo is the rebuilt `v2.2` path under `src/v2/`. It is explicit-goal, anchor-first, and transfer-aware:
 
 - retrieve strong SiTunes intervention anchors
 - rerank anchors by predicted benefit and acceptance
 - expand to Spotify / PMEmo only when public transfer support is strong enough
+
+The original HMM + DQN pipeline is still preserved in the repo as the earlier course approach and baseline/original design. It remains runnable, but it is no longer the main system we recommend for presentation or discussion.
 
 Its execution contract and finish criteria are tracked in `docs/V2_EXECUTION_PLAN.md`.
 For presentation prep and an end-to-end explanation of the rebuilt path, see `docs/PRESENTATION_REPORT.md`.
@@ -19,7 +21,7 @@ For the short 5-6 minute presentation talk track, see `docs/PRESENTATION_SCRIPT.
 
 ---
 
-## Quick Start For `v2.2`
+## Recommended Quick Start: `v2.2`
 
 If you are new to the repo and only want to run the rebuilt `v2.2` system, use this section.
 
@@ -75,7 +77,32 @@ This project asks a harder question:
 
 ## Our Solution
 
-A four-part ambient recommendation pipeline:
+The repo now contains two approaches:
+
+### Current recommended system: `v2.2`
+
+The rebuilt `v2.2` system solves the recommendation problem as:
+
+1. **Model the current context**  
+   Encode wrist sequence, environment, and optional self-report into a learned context representation.
+
+2. **Model the person**  
+   Build a user representation from Stage 1 taste history.
+
+3. **Retrieve historical intervention anchors**  
+   Use SiTunes as the intervention-supervision source and retrieve similar successful anchors.
+
+4. **Rerank by benefit and acceptance**  
+   Predict whether each anchor is likely to help and whether it is likely to be acceptable.
+
+5. **Transfer to public songs only when supported**  
+   Let Spotify and PMEmo candidates win only when anchor-conditioned transfer evidence is strong enough.
+
+This is the main system to use if you want the current best logic in the repo.
+
+### Original course pipeline: HMM + DQN
+
+The original approach is still included and still runnable:
 
 1. **Sense the current situation**  
    A 3-state HMM reads a 30-step wrist window and produces a belief distribution over coarse latent context-energy states.
@@ -89,11 +116,11 @@ A four-part ambient recommendation pipeline:
 4. **Retrieve real tracks**  
    A deterministic music library ranks concrete songs from SiTunes, Spotify, and PMEmo using bucket fit, scenario fit, and user preference fit.
 
-The key idea is still POMDP-style: the user's internal state is partially hidden, so the system reasons over a belief state rather than pretending wrist data directly reveals mood.
+The key idea in that older pipeline is still POMDP-style: the user's internal state is partially hidden, so the system reasons over a belief state rather than pretending wrist data directly reveals mood.
 
 ---
 
-## Experimental V2.2 Rebuild
+## Main System: Experimental V2.2 Rebuild
 
 The rebuilt `v2.2` path solves a different problem than the legacy bucket-first pipeline:
 
@@ -193,7 +220,7 @@ Latest verified `v2.2` readiness status:
 
 ---
 
-## Architecture
+## Original HMM + DQN Architecture
 
 ```text
 Biometrics + Context + Optional Check-In
@@ -460,6 +487,16 @@ Experimental rebuild outputs are written under:
 data/processed/rebuild/
 ```
 
+The main `v2.2` runtime surface is:
+
+```text
+train_v2.py
+eval_v2.py
+demo_v2.py
+scripts/build_v2_data.py
+src/v2/
+```
+
 ---
 
 ## Setup
@@ -549,7 +586,7 @@ If PMEmo or Spotify are missing, the core SiTunes pipeline still works. You can 
 
 ### Which path should you run?
 
-Use the rebuilt `v2.2` path if you want the current anchor-first system:
+Use the rebuilt `v2.2` path if you want the current recommended system:
 
 ```bash
 python train_v2.py
@@ -557,7 +594,7 @@ python eval_v2.py
 python demo_v2.py
 ```
 
-Use the legacy HMM + DQN path if you want the original graded pipeline:
+Use the legacy HMM + DQN path if you specifically want the original course pipeline:
 
 ```bash
 python -m src.data.preprocess
