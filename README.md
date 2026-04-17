@@ -35,41 +35,33 @@ Use the original HMM + DQN pipeline only if you specifically want the older cour
 
 ---
 
-## Understanding The Data
+## Datasets
 
-The repo uses three music/data sources, but they do **not** play the same role.
+| Dataset | Role | Size |
+|---------|------|------|
+| [SiTunes](https://github.com/JiayuLi-997/SiTunes_dataset) | Core intervention dataset: biometrics, context, pre/post emotion labels, and baseline preference survey | ~2,000 raw interactions -> 1,406 cleaned Stage 2/3 interactions, 30 users |
+| [PMEmo](https://github.com/HuiZhangDB/PMEmo) | Transfer-side music-affect support and optional EDA signal | 736 labeled tracks |
+| [Spotify Kaggle](https://www.kaggle.com/datasets/maharshipandya/-spotify-tracks-dataset) | Large public music catalog for transfer candidates | ~89,500 tracks |
 
-### SiTunes
+### How each dataset is actually used
 
-SiTunes is the key dataset because it contains the full intervention story:
-- user context
-- biometric signal
-- pre-state
-- post-state
-- user feedback
-
-That is why `v2.2` uses **SiTunes** as the main supervision source for intervention quality.
-
-### PMEmo
-
-PMEmo is used for:
-- affect cues
-- dynamic valence/arousal contours
-- optional EDA-style response signal
-
-In `v2.2`, PMEmo is a **transfer-side music representation source**, not the main intervention-label source.
-
-### Spotify Kaggle
-
-Spotify Kaggle is the large public catalog.
-
-In `v2.2`, it is mainly used as a **public transfer catalog** so the system can recommend real public songs when anchor support is strong enough.
+- **SiTunes Stage 1**
+  - baseline preference modeling
+- **SiTunes Stage 2 and Stage 3**
+  - intervention-outcome learning
+  - anchor supervision for `v2.2`
+- **PMEmo**
+  - transfer-side affect cues
+  - dynamic valence/arousal contours
+  - optional EDA-derived signal
+- **Spotify Kaggle**
+  - large public transfer catalog
 
 ### Why this matters
 
-This is the main logic behind `v2.2`:
+For `v2.2`, the key rule is:
 - learn intervention quality from **SiTunes**
-- use **PMEmo** and **Spotify** to support transfer to public songs
+- use **PMEmo** and **Spotify** for public transfer, not as primary intervention labels
 
 That is why the rebuilt system is anchor-first instead of treating the mixed public catalog as if it were fully labeled.
 
@@ -95,6 +87,34 @@ Current `v2.2` caveat:
 Source-of-truth artifacts:
 - `models/rebuild/offline_eval_v2.json`
 - `models/rebuild/v2_readiness.json`
+
+---
+
+## How To Read The `v2.2` Results
+
+The rebuilt `v2.2` system is **not** mainly trying to recover the exact historical song. Its main job is:
+
+1. retrieve strong historical SiTunes intervention anchors
+2. rerank them by predicted benefit and acceptance
+3. transfer to public songs only when that transfer is actually supported
+
+So the most important metrics are:
+
+| Metric | What it means in plain English | Why it matters |
+|--------|--------------------------------|----------------|
+| `ready = true` | the rebuilt system passes its main readiness contract | shows that the primary `v2.2` gates are currently satisfied |
+| anchor query `recall@20 = 0.7460` | in about 75% of held-out test cases, retrieval finds at least one useful anchor in the top 20 | shows the first-stage retriever is usually finding relevant SiTunes interventions |
+| anchor query weighted `recall@20 = 0.3011` | the retriever is not only finding any positive anchor, but also finding stronger tiered positives often enough | checks that the retriever is surfacing better anchors, not only weak neighbors |
+| anchor rerank `hit@10 = 0.7170` | after reranking, a useful anchor appears in the top 10 in about 72% of held-out cases | shows the second stage usually improves the candidate list into a usable recommendation set |
+| anchor rerank mean rank `= 5.9270` | when a positive anchor is found, it tends to be near the top | lower is better; this checks that good anchors are not buried |
+| benefit MAE `= 0.1262` | predicted emotional benefit is fairly close to observed benefit | lower is better; this checks whether the model’s benefit estimates are numerically credible |
+| blended acceptance MAE `= 0.2947` | predicted user acceptance is reasonably calibrated | lower is better; this checks whether the system is balancing helpfulness with plausibility |
+| public-transfer-supported share `= 0.6399` | public songs win in about 64% of held-out cases, but only when support is strong enough | shows the system is actually using public transfer rather than staying anchor-only |
+| top-1 source max share `= 0.6399` | no single source completely dominates the top recommendation | checks that the system is not collapsing to one catalog |
+
+Important caution:
+- legacy exact-song metrics are still reported, but they are **diagnostic only**
+- a weak exact-song metric does **not** mean `v2.2` failed, because exact historical song imitation is no longer the primary objective
 
 ---
 
@@ -141,6 +161,19 @@ That lets you show:
 - goal-dependent recommendation changes
 - fallback to SiTunes anchors when public transfer support is weak
 - promotion of Spotify when transfer support is strong enough
+
+How to explain the demo:
+- if the top result stays in **SiTunes**, the model is saying the anchor evidence is stronger than the transfer evidence
+- if the top result becomes **Spotify**, the model is saying public transfer support is strong enough to promote a public song
+- the demo is not trying to prove that every goal must give a completely different song
+- it is trying to prove that the system changes behavior in a goal-consistent, support-aware way
+
+What to look for in the current verified demo:
+- `focus` falls back to SiTunes anchors
+- `wind_down` transfers to Spotify
+- `uplift` and `movement` can still fall back to anchors when transfer support is weaker on that same row
+
+That pattern is good for `v2.2`, because it shows the model is not blindly pushing public songs to the top.
 
 Recommended presentation commands:
 
