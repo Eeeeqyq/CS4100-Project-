@@ -227,6 +227,48 @@ This path is preserved for continuity and comparison, but it is not the main sys
 
 ---
 
+## Repo Structure
+
+```text
+CS4100-Project-/
+|-- train_v2.py, eval_v2.py, demo_v2.py
+|   `-- top-level entrypoints for the rebuilt v2.2 system
+|-- scripts/
+|   `-- build_v2_data.py
+|       `-- rebuilt data-contract builder
+|-- src/
+|   |-- v2/
+|   |   |-- data/
+|   |   |-- train/
+|   |   |-- inference/
+|   |   `-- eval/
+|   |       `-- rebuilt v2.2 pipeline
+|   |-- data/
+|   |-- hmm/
+|   |-- rl_agent/
+|   `-- music/
+|       `-- original HMM + DQN pipeline modules
+|-- train_agent.py, eval_agent.py, demo.py, simulate_user.py
+|   `-- top-level entrypoints for the original pipeline
+|-- docs/
+|   |-- PROJECT_STATE.md
+|   |-- PRESENTATION_REPORT.md
+|   `-- V2_EXECUTION_PLAN.md
+|-- models/
+|   `-- rebuild/
+|       `-- saved v2.2 evaluation/readiness artifacts
+`-- data/
+    `-- raw and processed datasets
+```
+
+If you only care about the current recommended system, start with:
+- `train_v2.py`
+- `eval_v2.py`
+- `demo_v2.py`
+- `src/v2/`
+
+---
+
 ## Raw Data Paths
 
 Raw-data roots:
