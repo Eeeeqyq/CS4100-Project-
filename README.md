@@ -111,30 +111,36 @@ That is why the rebuilt system is anchor-first instead of treating the mixed pub
 
 ---
 
-## Current Verified `v2.2` Status
+## Original HMM + DQN Findings
 
-Latest saved rebuilt result:
-- `ready = true`
-- held-out test rows: `311`
-- anchor query `recall@20 = 0.7460`
-- anchor query weighted `recall@20 = 0.3011`
-- anchor rerank `hit@10 = 0.7170`
-- anchor rerank mean rank `= 5.9270`
-- benefit MAE `= 0.1262`
-- blended acceptance MAE `= 0.2947`
-- public-transfer-supported share `= 0.6399`
-- top-1 source max share `= 0.6399`
+Latest saved legacy result from `models/eval_report.json` on the held-out test split:
 
-Current `v2.2` caveat:
-- legacy exact-song rerank is still only a soft diagnostic and remains weak
+| Metric | DQN | State-Prior | Always-7 | Random |
+|--------|-----|-------------|----------|--------|
+| Combined reward | `+0.1639` | `+0.1641` | `+0.0821` | `+0.0781` |
+| Emotion benefit | `+0.0465` | `+0.0439` | `+0.0104` | - |
+| Acceptance | `+0.4377` | `+0.4446` | `+0.2494` | - |
+| Regret | `0.0021` | `0.0019` | `0.0839` | - |
 
-Source-of-truth artifacts:
-- `models/rebuild/offline_eval_v2.json`
-- `models/rebuild/v2_readiness.json`
+Additional saved HMM summary from the current generated artifacts:
+- mean belief entropy: `0.1592`
+- rounded unique belief vectors: `473`
+- corrected state usage:
+  - state 0: `656`
+  - state 1: `481`
+  - state 2: `269`
+
+How to interpret this:
+- the original DQN clearly beats trivial baselines such as `always7` and uniform random
+- it is still slightly below the `state_prior` baseline on held-out combined reward
+- the original pipeline is still runnable and scientifically interpretable, but it is no longer the strongest research story in the repo compared with `v2.2`
+
+Source-of-truth artifact:
+- `models/eval_report.json`
 
 ---
 
-## How To Read The `v2.2` Results
+## `v2.2` Results And Interpretation
 
 The rebuilt `v2.2` system is **not** mainly trying to recover the exact historical song. Its main job is:
 
@@ -142,23 +148,28 @@ The rebuilt `v2.2` system is **not** mainly trying to recover the exact historic
 2. rerank them by predicted benefit and acceptance
 3. transfer to public songs only when that transfer is actually supported
 
-So the most important metrics are:
+Latest saved rebuilt result:
 
-| Metric | What it means in plain English | Why it matters |
-|--------|--------------------------------|----------------|
-| `ready = true` | the rebuilt system passes its main readiness contract | shows that the primary `v2.2` gates are currently satisfied |
-| anchor query `recall@20 = 0.7460` | in about 75% of held-out test cases, retrieval finds at least one useful anchor in the top 20 | shows the first-stage retriever is usually finding relevant SiTunes interventions |
-| anchor query weighted `recall@20 = 0.3011` | the retriever is not only finding any positive anchor, but also finding stronger tiered positives often enough | checks that the retriever is surfacing better anchors, not only weak neighbors |
-| anchor rerank `hit@10 = 0.7170` | after reranking, a useful anchor appears in the top 10 in about 72% of held-out cases | shows the second stage usually improves the candidate list into a usable recommendation set |
-| anchor rerank mean rank `= 5.9270` | when a positive anchor is found, it tends to be near the top | lower is better; this checks that good anchors are not buried |
-| benefit MAE `= 0.1262` | predicted emotional benefit is fairly close to observed benefit | lower is better; this checks whether the model’s benefit estimates are numerically credible |
-| blended acceptance MAE `= 0.2947` | predicted user acceptance is reasonably calibrated | lower is better; this checks whether the system is balancing helpfulness with plausibility |
-| public-transfer-supported share `= 0.6399` | public songs win in about 64% of held-out cases, but only when support is strong enough | shows the system is actually using public transfer rather than staying anchor-only |
-| top-1 source max share `= 0.6399` | no single source completely dominates the top recommendation | checks that the system is not collapsing to one catalog |
+| Metric | Value | What it means in plain English | Why it matters |
+|--------|-------|--------------------------------|----------------|
+| `ready` | `true` | the rebuilt system passes its main readiness contract | shows that the primary `v2.2` gates are currently satisfied |
+| held-out test rows | `311` | the main offline result is measured on 311 held-out decision rows from unseen test users | shows the result is a held-out evaluation, not a training metric |
+| anchor query `recall@20` | `0.7460` | in about 75% of held-out test cases, retrieval finds at least one useful anchor in the top 20 | shows the first-stage retriever is usually finding relevant SiTunes interventions |
+| anchor query weighted `recall@20` | `0.3011` | the retriever is not only finding any positive anchor, but also finding stronger tiered positives often enough | checks that the retriever is surfacing better anchors, not only weak neighbors |
+| anchor rerank `hit@10` | `0.7170` | after reranking, a useful anchor appears in the top 10 in about 72% of held-out cases | shows the second stage usually improves the candidate list into a usable recommendation set |
+| anchor rerank mean rank | `5.9270` | when a positive anchor is found, it tends to be near the top | lower is better; this checks that good anchors are not buried |
+| benefit MAE | `0.1262` | predicted emotional benefit is fairly close to observed benefit | lower is better; this checks whether the model’s benefit estimates are numerically credible |
+| blended acceptance MAE | `0.2947` | predicted user acceptance is reasonably calibrated | lower is better; this checks whether the system is balancing helpfulness with plausibility |
+| public-transfer-supported share | `0.6399` | public songs win in about 64% of held-out cases, but only when support is strong enough | shows the system is actually using public transfer rather than staying anchor-only |
+| top-1 source max share | `0.6399` | no single source completely dominates the top recommendation | checks that the system is not collapsing to one catalog |
 
 Important caution:
 - legacy exact-song metrics are still reported, but they are **diagnostic only**
 - a weak exact-song metric does **not** mean `v2.2` failed, because exact historical song imitation is no longer the primary objective
+
+Source-of-truth artifacts:
+- `models/rebuild/offline_eval_v2.json`
+- `models/rebuild/v2_readiness.json`
 
 ---
 
