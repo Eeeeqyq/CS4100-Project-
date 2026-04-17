@@ -79,6 +79,45 @@ The main reasoning is:
 
 ---
 
+## Original HMM + DQN Approach At A Glance
+
+The original course pipeline uses a different AI design. It is simpler than `v2.2`, but still grounded in a clear logic.
+
+| Method | What it does in the original pipeline | Why it was used |
+|--------|----------------------------------------|-----------------|
+| **Hidden Markov Model (HMM)** | converts wrist observations into a coarse latent belief over 3 hidden states | the user's internal state is only partially observable, so the system uses a belief state rather than treating raw wrist data as direct mood labels |
+| **Feature-based state construction** | combines HMM belief with context, check-in, and preference features into a `16D` RL state | the policy needs more than wrist-only information to make a recommendation decision |
+| **Hierarchical reward model** | estimates expected emotional benefit and acceptance for state-action pairs | offline recommendation needs a reward estimate before training a policy, and the data is too sparse for naive fine-grained estimates |
+| **Double DQN** | chooses one of 8 music buckets from the offline state | the course setup is framed as a sequential decision problem, so the policy is learned over discrete actions |
+| **Deterministic retrieval** | maps the chosen bucket to actual tracks from SiTunes, PMEmo, and Spotify | the policy chooses an intervention type first, then retrieval turns that into concrete songs |
+
+### How the original pipeline fits together
+
+1. **Preprocess the datasets**
+   - clean SiTunes and build optional PMEmo / Spotify retrieval tables
+2. **Train the HMM**
+   - read wrist observations and estimate a coarse latent belief state
+3. **Build the RL state**
+   - combine the HMM belief with time, activity, weather, speed, self-report, and taste features
+4. **Estimate reward**
+   - model emotional benefit and acceptance from offline intervention data
+5. **Train the DQN**
+   - choose one of 8 music buckets
+6. **Retrieve tracks**
+   - rank actual songs consistent with the chosen bucket and the user's baseline taste
+
+### Main logic behind the original approach
+
+The original pipeline treats music recommendation as a POMDP-style problem:
+- the user’s true internal state is hidden
+- wrist signals provide only partial evidence
+- the HMM maintains a belief over coarse latent states
+- the DQN then chooses an action bucket using that belief plus explicit context features
+
+This approach is still useful to understand because it is the starting point that `v2.2` improves on.
+
+---
+
 ## Datasets
 
 | Dataset | Role | Size |
