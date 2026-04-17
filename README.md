@@ -15,6 +15,7 @@ A parallel experimental `v2.2` rebuild path also exists under `src/v2/`. It is s
 
 Its execution contract and finish criteria are tracked in `docs/V2_EXECUTION_PLAN.md`.
 For presentation prep and an end-to-end explanation of the rebuilt path, see `docs/PRESENTATION_REPORT.md`.
+For the short 5-6 minute presentation talk track, see `docs/PRESENTATION_SCRIPT.md`.
 
 ---
 
@@ -50,6 +51,15 @@ Important notes:
 - `train_v2.py` expects the raw datasets to exist under the paths listed in the Setup section below
 - `train_v2.py` is the expensive path; use `eval_v2.py --no-rerun` and `demo_v2.py` if you only need the latest saved outputs
 - the legacy HMM + DQN pipeline is still in the repo, but it is separate from the `v2.2` commands above
+
+Current verified `v2.2` status from the latest saved artifacts:
+
+- `ready = true`
+- held-out test rows: `311`
+- anchor query `recall@20 = 0.7460`
+- anchor rerank `hit@10 = 0.7170`
+- benefit MAE `= 0.1262`
+- blended acceptance MAE `= 0.2947`
 
 ---
 
@@ -398,12 +408,20 @@ CS4100-Project-/
 |       |-- synthetic_clean.csv
 |       `-- synthetic_state_vectors.npy
 |-- docs/
-|   `-- PROJECT_STATE.md
+|   |-- PROJECT_STATE.md
+|   |-- PRESENTATION_REPORT.md
+|   |-- PRESENTATION_SCRIPT.md
+|   `-- V2_EXECUTION_PLAN.md
 |-- models/
 |   |-- hmm.npz
 |   |-- reward_model.json
 |   |-- agent.pt
-|   `-- eval_report.json
+|   |-- eval_report.json
+|   `-- rebuild/
+|       |-- offline_eval_v2.json
+|       `-- v2_readiness.json
+|-- scripts/
+|   `-- build_v2_data.py
 |-- src/
 |   |-- data/
 |   |   |-- common.py
@@ -418,11 +436,20 @@ CS4100-Project-/
 |   |   |-- environment.py
 |   |   |-- dqn_agent.py
 |   |   `-- reward_model.py
-|   `-- music/
-|       `-- music_library.py
+|   |-- music/
+|   |   `-- music_library.py
+|   `-- v2/
+|       |-- data/
+|       |-- eval/
+|       |-- inference/
+|       |-- models/
+|       `-- train/
 |-- train_agent.py
 |-- eval_agent.py
 |-- demo.py
+|-- train_v2.py
+|-- eval_v2.py
+|-- demo_v2.py
 |-- simulate_user.py
 `-- requirements.txt
 ```
@@ -519,6 +546,29 @@ If PMEmo or Spotify are missing, the core SiTunes pipeline still works. You can 
 ## Running the Project
 
 > Always run commands from the project root.
+
+### Which path should you run?
+
+Use the rebuilt `v2.2` path if you want the current anchor-first system:
+
+```bash
+python train_v2.py
+python eval_v2.py
+python demo_v2.py
+```
+
+Use the legacy HMM + DQN path if you want the original graded pipeline:
+
+```bash
+python -m src.data.preprocess
+python src/hmm/hmm_train.py
+python src/hmm/precompute_beliefs.py
+python src/data/generate_synthetic.py
+python train_agent.py --synthetic-weight 0.25
+python eval_agent.py
+python demo.py
+python simulate_user.py
+```
 
 ### Step 1 - Preprocess the datasets
 
