@@ -1,13 +1,14 @@
 """
-One-command entrypoint for the rebuilt V2.2 pipeline.
+One script to run the whole V2.2 thing.
 
-Runs the full Block B stack from the project root:
-- data build
-- encoder training
-- query tower training
-- reranker training
-- end-to-end eval
-- readiness check
+Basically does everything so we do not have to run
+like 8 commands by hand from the root folder:
+- build data
+- train encoders
+- train query tower
+- train reranker
+- run eval
+- run readiness check
 """
 
 from __future__ import annotations
@@ -63,8 +64,8 @@ def run_step(index: int, total: int, title: str, command: list[str], verbose: bo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the full rebuilt V2.2 pipeline.")
-    parser.add_argument("--verbose", action="store_true", help="Print raw output from each underlying step.")
+    parser = argparse.ArgumentParser(description="Run the full V2.2 pipeline in one go.")
+    parser.add_argument("--verbose", action="store_true", help="Show all the noisy logs from each step.")
     args = parser.parse_args()
 
     total = len(STEPS)
@@ -72,8 +73,9 @@ def main() -> None:
         run_step(idx, total, title, command, verbose=bool(args.verbose))
     print("=" * 96)
     print("V2.2 full run complete.")
-    print("Use `python eval_v2.py --no-rerun` to print the latest summary again.")
-    print("Use `python demo_v2.py` for the presentation-friendly demo output.")
+    print("Use `python eval_v2.py --no-rerun` if you just want the latest summary again.")
+    print("Use `python demo_v2.py` for demo output.")
+    print("If `python` is weird on your Mac, try `python3`.")
     print("=" * 96)
 
 
