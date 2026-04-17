@@ -35,6 +35,46 @@ Use the original HMM + DQN pipeline only if you specifically want the older cour
 
 ---
 
+## Understanding The Data
+
+The repo uses three music/data sources, but they do **not** play the same role.
+
+### SiTunes
+
+SiTunes is the key dataset because it contains the full intervention story:
+- user context
+- biometric signal
+- pre-state
+- post-state
+- user feedback
+
+That is why `v2.2` uses **SiTunes** as the main supervision source for intervention quality.
+
+### PMEmo
+
+PMEmo is used for:
+- affect cues
+- dynamic valence/arousal contours
+- optional EDA-style response signal
+
+In `v2.2`, PMEmo is a **transfer-side music representation source**, not the main intervention-label source.
+
+### Spotify Kaggle
+
+Spotify Kaggle is the large public catalog.
+
+In `v2.2`, it is mainly used as a **public transfer catalog** so the system can recommend real public songs when anchor support is strong enough.
+
+### Why this matters
+
+This is the main logic behind `v2.2`:
+- learn intervention quality from **SiTunes**
+- use **PMEmo** and **Spotify** to support transfer to public songs
+
+That is why the rebuilt system is anchor-first instead of treating the mixed public catalog as if it were fully labeled.
+
+---
+
 ## Current Verified `v2.2` Status
 
 Latest saved rebuilt result:
@@ -111,7 +151,6 @@ python demo_v2.py
 
 For the full presentation explanation:
 - `docs/PRESENTATION_REPORT.md`
-- `docs/PRESENTATION_SCRIPT.md`
 
 ---
 
@@ -155,7 +194,7 @@ This path is preserved for continuity and comparison, but it is not the main sys
 
 ---
 
-## Data
+## Raw Data Paths
 
 Raw-data roots:
 - SiTunes: `data/raw/situnes/SiTunes/`
@@ -165,20 +204,6 @@ Raw-data roots:
 Requirements:
 - **SiTunes is required**
 - **PMEmo and Spotify are optional but recommended**
-
-What each dataset is used for in `v2.2`:
-- **SiTunes**
-  - Stage 1: baseline taste history
-  - Stage 2/3: intervention anchors and outcome supervision
-- **PMEmo**
-  - transfer-side affect cues
-  - dynamic valence/arousal contours
-  - optional EDA-derived signal
-- **Spotify Kaggle**
-  - large public transfer catalog
-
-Important point:
-- Spotify and PMEmo are used in `v2.2`, but **not** as primary intervention-label sources
 
 ---
 
@@ -332,8 +357,6 @@ python simulate_user.py
   - current operational truth, artifacts, and verified metrics
 - `docs/PRESENTATION_REPORT.md`
   - full explanation of `v2.2`
-- `docs/PRESENTATION_SCRIPT.md`
-  - short 5-6 minute presentation talk track
 - `docs/V2_EXECUTION_PLAN.md`
   - rebuilt `v2.2` execution contract
 
