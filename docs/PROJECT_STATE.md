@@ -1,6 +1,6 @@
 # Project State
 
-Last updated: 2026-04-12
+Last updated: 2026-04-17
 
 Rule: after any meaningful implementation change, update this file in the same work session. If the public workflow or user-facing commands changed, update `README.md` too.
 
@@ -500,6 +500,15 @@ Generated artifacts:
 - `models/rebuild/offline_eval_v2.json`
 - `models/rebuild/v2_readiness.json`
 - `data/processed/rebuild/offline_eval_v2_predictions.parquet`
+- `figures/v2_eval/v2_source_mix.png`
+- `figures/v2_eval/v2_goal_breakdown.png`
+
+Current `eval_v2.py` figure export behavior:
+
+- the wrapper now exports only the two presentation-facing figures above
+- it no longer exports the mixed-direction `v2_key_metrics.png` chart, the low-priority `v2_legacy_diagnostics.png` chart, or the optional pipeline overview diagram
+- the goal-breakdown figure now includes per-goal sample counts in the x-axis labels
+- the wrapper also removes those stale unused PNGs from `figures/v2_eval/` when rerun
 
 Last verified end-to-end test result from `models/rebuild/offline_eval_v2.json`:
 

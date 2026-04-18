@@ -236,7 +236,7 @@ python demo_v2.py
 
 What the wrappers do:
 - `train_v2.py`: full rebuilt Block B stack
-- `eval_v2.py`: clean offline summary + readiness output
+- `eval_v2.py`: clean offline summary + readiness output + presentation figures (`source_mix`, `goal_breakdown`)
 - `demo_v2.py`: presentation-friendly goal-conditioned demo
 
 Do **not** run `train_v2.py` live during a presentation.

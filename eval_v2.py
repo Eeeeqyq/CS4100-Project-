@@ -87,9 +87,11 @@ def save_figures(offline_eval: dict, output_dir: Path) -> list[Path]:
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    for stale_name in ("v2_key_metrics.png", "v2_legacy_diagnostics.png", "v2_pipeline_overview.png"):
+        stale_path = output_dir / stale_name
+        if stale_path.exists():
+            stale_path.unlink()
     created_paths: list[Path] = []
-    primary = offline_eval["primary_metrics"]
-    palette = ["#4C78A8", "#F58518", "#54A24B", "#B279A2"]
 
     def _annotate_bars(ax, bars, fmt: str = "{:.3f}", y_pad: float = 0.02) -> None:
         y_top = ax.get_ylim()[1]
@@ -114,28 +116,7 @@ def save_figures(offline_eval: dict, output_dir: Path) -> list[Path]:
                 color=color,
             )
 
-    # 1) Core V2.2 metrics.
-    fig1, ax1 = plt.subplots(figsize=(10.5, 6.2), constrained_layout=True)
-    labels = ["Query R@20", "Rerank Hit@10", "Benefit MAE", "Accept MAE"]
-    values = [
-        float(primary["anchor_query_recall_at_20"]),
-        float(primary["anchor_rerank_hit_at_10"]),
-        float(primary["benefit_mae"]),
-        float(primary["blended_accept_mae"]),
-    ]
-    bars = ax1.bar(labels, values, color=palette, edgecolor="#2b2b2b", linewidth=0.4)
-    ax1.set_title("V2.2 Key Metrics", pad=12)
-    ax1.set_ylabel("Value")
-    ax1.set_ylim(0.0, max(1.0, max(values) * 1.20))
-    ax1.grid(axis="y", linestyle="--", alpha=0.28)
-    ax1.grid(axis="x", visible=False)
-    _annotate_bars(ax1, bars, fmt="{:.3f}", y_pad=0.02)
-    fig1_path = output_dir / "v2_key_metrics.png"
-    fig1.savefig(fig1_path, dpi=260, facecolor="white")
-    plt.close(fig1)
-    created_paths.append(fig1_path)
-
-    # 2) Top-1 source distribution.
+    # 1) Top-1 source distribution.
     source_dist = offline_eval.get("top1_source_distribution", {})
     if source_dist:
         ordered = sorted(source_dist.items(), key=lambda item: item[1], reverse=True)
@@ -154,7 +135,7 @@ def save_figures(offline_eval: dict, output_dir: Path) -> list[Path]:
         plt.close(fig2)
         created_paths.append(fig2_path)
 
-    # 3) Per-goal summary.
+    # 2) Per-goal summary with sample counts.
     goal_breakdown = offline_eval.get("goal_breakdown", {})
     ordered_goals = [goal for goal in ["focus", "wind_down", "uplift", "movement"] if goal in goal_breakdown]
     if ordered_goals:
@@ -162,6 +143,7 @@ def save_figures(offline_eval: dict, output_dir: Path) -> list[Path]:
         x_pos = list(range(len(ordered_goals)))
         wq20 = [float(goal_breakdown[goal]["anchor_query_weighted_recall_at_20"]) for goal in ordered_goals]
         hit10 = [float(goal_breakdown[goal]["anchor_rerank_hit_at_10"]) for goal in ordered_goals]
+        sample_counts = [int(goal_breakdown[goal]["rows"]) for goal in ordered_goals]
         width = 0.36
         bars31 = ax3.bar(
             [x - width / 2.0 for x in x_pos],
@@ -182,7 +164,7 @@ def save_figures(offline_eval: dict, output_dir: Path) -> list[Path]:
             linewidth=0.35,
         )
         ax3.set_xticks(x_pos)
-        ax3.set_xticklabels(ordered_goals)
+        ax3.set_xticklabels([f"{goal}\n(n={count})" for goal, count in zip(ordered_goals, sample_counts)])
         ax3.set_ylim(0.0, 1.0)
         ax3.set_ylabel("Score")
         ax3.set_title("Per-Goal Retrieval / Rerank Quality", pad=12)
@@ -195,38 +177,6 @@ def save_figures(offline_eval: dict, output_dir: Path) -> list[Path]:
         fig3.savefig(fig3_path, dpi=260, facecolor="white")
         plt.close(fig3)
         created_paths.append(fig3_path)
-
-    # 4) Legacy diagnostics in two panels to avoid mixed-scale clutter.
-    legacy = offline_eval.get("legacy_diagnostics", {})
-    if legacy:
-        fig4, (ax41, ax42) = plt.subplots(1, 2, figsize=(12.2, 5.8), constrained_layout=True)
-        rate_labels = ["Exact Query R@50", "Exact Rerank Hit@10"]
-        rate_values = [
-            float(legacy.get("exact_song_query_recall_at_50", 0.0)),
-            float(legacy.get("exact_song_rerank_hit_at_10", 0.0)),
-        ]
-        bars41 = ax41.bar(rate_labels, rate_values, color=["#4C78A8", "#F58518"], edgecolor="#2b2b2b", linewidth=0.35)
-        ax41.set_title("Legacy Rates")
-        ax41.set_ylim(0.0, 1.0)
-        ax41.set_ylabel("Rate")
-        ax41.grid(axis="y", linestyle="--", alpha=0.28)
-        ax41.grid(axis="x", visible=False)
-        _annotate_bars(ax41, bars41, fmt="{:.3f}", y_pad=0.03)
-
-        exact_rank = float(legacy.get("exact_song_conditional_rank", 0.0))
-        bars42 = ax42.bar(["Exact Rank (Lower Better)"], [exact_rank], color="#9C755F", edgecolor="#2b2b2b", linewidth=0.35)
-        ax42.set_title("Legacy Rank")
-        ax42.set_ylim(0.0, max(5.0, exact_rank * 1.25))
-        ax42.set_ylabel("Rank")
-        ax42.grid(axis="y", linestyle="--", alpha=0.28)
-        ax42.grid(axis="x", visible=False)
-        _annotate_bars(ax42, bars42, fmt="{:.3f}", y_pad=max(0.2, 0.02 * max(5.0, exact_rank)))
-
-        fig4.suptitle("Legacy Exact-Song Diagnostics", fontsize=20, fontweight="semibold")
-        fig4_path = output_dir / "v2_legacy_diagnostics.png"
-        fig4.savefig(fig4_path, dpi=260, facecolor="white")
-        plt.close(fig4)
-        created_paths.append(fig4_path)
 
     return created_paths
 
