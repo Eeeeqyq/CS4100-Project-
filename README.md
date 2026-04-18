@@ -346,7 +346,6 @@ CS4100-Project-/
 |   `-- top-level entrypoints for the original pipeline
 |-- docs/
 |   |-- PROJECT_STATE.md
-|   |-- PRESENTATION_REPORT.md
 |   `-- V2_EXECUTION_PLAN.md
 |-- models/
 |   `-- rebuild/
@@ -524,8 +523,6 @@ python simulate_user.py
 
 - `docs/PROJECT_STATE.md`
   - current operational truth, artifacts, and verified metrics
-- `docs/PRESENTATION_REPORT.md`
-  - full explanation of `v2.2`
 - `docs/V2_EXECUTION_PLAN.md`
   - rebuilt `v2.2` execution contract
 

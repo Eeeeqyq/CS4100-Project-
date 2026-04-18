@@ -24,7 +24,6 @@ Experimental parallel rebuild scaffold:
 The `v2` rebuild now also has an explicit execution contract in:
 
 - `docs/V2_EXECUTION_PLAN.md`
-- `docs/PRESENTATION_REPORT.md` provides the presentation-oriented explanation of the rebuilt path and its current verified results.
 - top-level wrapper entrypoints now exist:
   - `train_v2.py`
   - `eval_v2.py`
