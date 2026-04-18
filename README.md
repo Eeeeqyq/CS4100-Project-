@@ -276,9 +276,6 @@ python eval_v2.py --no-rerun
 python demo_v2.py
 ```
 
-For the full presentation explanation:
-- `docs/PRESENTATION_REPORT.md`
-
 ---
 
 ## Systems In This Repo
