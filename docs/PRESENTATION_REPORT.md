@@ -1,6 +1,6 @@
 # V2.2 Presentation Report
 
-Last updated: 2026-04-12
+Last updated: 2026-04-17
 
 ## Purpose
 
@@ -659,38 +659,36 @@ This is the correct scientific compromise for the data currently wired into the 
 Use these for the presentation:
 
 ```bash
-python eval_v2.py
+python eval_v2.py --no-rerun
 python demo_v2.py
 ```
 
-These were re-run and verified on `2026-04-12`.
+These were re-run and verified on `2026-04-17`.
 
 ### Example: same held-out test row, different explicit goals
 
-For test row `128`, the system changes the top recommendation when we change the goal.
+For test row `128`, the system changes the winning path when we change the goal.
 
-| Goal | Top-1 Song | Source | Transfer Supported | Reason |
-|------|------------|--------|-------------------|--------|
-| `focus` | `BUTTERFLY EFFECT` | Spotify | yes | stable low-volatility contour |
-| `wind_down` | `Iragai Poley` | Spotify | yes | stable low-volatility contour |
-| `uplift` | `BUTTERFLY EFFECT` | Spotify | yes | stable low-volatility contour |
-| `movement` | `505` | Spotify | yes | supported by similar successful movement anchors |
+| Goal | Top-1 Song | Source | Winning Path | Reason |
+|------|------------|--------|--------------|--------|
+| `focus` | `Get Up` | SiTunes | `anchor` | supported by similar successful focus anchors; public transfer support stayed below threshold |
+| `wind_down` | `Buttercup` | Spotify | `public_transfer` | stable low-volatility contour |
+| `uplift` | `Get Up` | SiTunes | `anchor` | supported by similar successful uplift anchors; public transfer support stayed below threshold |
+| `movement` | `Get Up` | SiTunes | `anchor` | supported by similar successful movement anchors; public transfer support stayed below threshold |
 
 ### What this demo shows
 
 It shows three important things:
 
 1. the system is **goal-sensitive**, not just context-sensitive
-2. public songs can win, but only with strong anchor support
-3. the explanation text is tied to either:
-   - public transfer evidence
-   - or successful anchor support
+2. public songs can win, but only when anchor support is strong enough
+3. when that support is weaker, the system falls back to SiTunes anchors instead of forcing a public song
 
 ### What to say during the demo
 
 Say something like:
 
-> The system is not trying to recover one memorized song. It first retrieves similar successful historical interventions from SiTunes, then checks whether a public-catalog song is well-supported by those anchors for the current goal.
+> The system is not trying to recover one memorized song. It first retrieves similar successful historical interventions from SiTunes, then checks whether a public-catalog song is supported strongly enough by those anchors for the current goal.
 
 That line captures the main design idea.
 

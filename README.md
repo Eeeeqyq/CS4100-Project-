@@ -109,7 +109,7 @@ The original course pipeline uses a different AI design. It is simpler than `v2.
 ### Main logic behind the original approach
 
 The original pipeline treats music recommendation as a POMDP-style problem:
-- the user’s true internal state is hidden
+- the user's true internal state is hidden
 - wrist signals provide only partial evidence
 - the HMM maintains a belief over coarse latent states
 - the DQN then chooses an action bucket using that belief plus explicit context features
@@ -197,7 +197,7 @@ Latest saved rebuilt result:
 | anchor query weighted `recall@20` | `0.3011` | the retriever is not only finding any positive anchor, but also finding stronger tiered positives often enough | checks that the retriever is surfacing better anchors, not only weak neighbors |
 | anchor rerank `hit@10` | `0.7170` | after reranking, a useful anchor appears in the top 10 in about 72% of held-out cases | shows the second stage usually improves the candidate list into a usable recommendation set |
 | anchor rerank mean rank | `5.9270` | when a positive anchor is found, it tends to be near the top | lower is better; this checks that good anchors are not buried |
-| benefit MAE | `0.1262` | predicted emotional benefit is fairly close to observed benefit | lower is better; this checks whether the model’s benefit estimates are numerically credible |
+| benefit MAE | `0.1262` | predicted emotional benefit is fairly close to observed benefit | lower is better; this checks whether the model's benefit estimates are numerically credible |
 | blended acceptance MAE | `0.2947` | predicted user acceptance is reasonably calibrated | lower is better; this checks whether the system is balancing helpfulness with plausibility |
 | public-transfer-supported share | `0.6399` | public songs win in about 64% of held-out cases, but only when support is strong enough | shows the system is actually using public transfer rather than staying anchor-only |
 | top-1 source max share | `0.6399` | no single source completely dominates the top recommendation | checks that the system is not collapsing to one catalog |

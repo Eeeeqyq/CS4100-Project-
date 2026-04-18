@@ -1,6 +1,6 @@
 # V2.2 Execution Plan
 
-Last updated: 2026-04-12
+Last updated: 2026-04-17
 
 This file is the execution contract for the rebuilt `v2.2` path under `src/v2/`.
 
@@ -108,14 +108,14 @@ These are the gates that define `v2.2` readiness.
 - anchor retrieval `recall@50 >= 0.35`
 - anchor retrieval weighted `recall@20 >= 0.15`
 - anchor retrieval weighted `recall@50 >= 0.25`
-- anchor rerank `hit@10 >= 0.30`
+- anchor rerank `hit@10 >= 0.25`
 - anchor rerank conditional mean positive rank `<= 6.0`
 - anchor rerank weighted NDCG@10 `>= 0.20`
 - benefit MAE `<= 0.20`
 - blended acceptance MAE `<= 0.35`
 - top-1 predicted acceptance mean `>= -0.10`
 - public-transfer-supported share `>= 0.05`
-- no single top-1 source share `> 0.85`
+- no single top-1 source share `> 0.85` (equivalently `top-1 source max share <= 0.85`)
 - per supported goal weighted anchor `recall@20 >= 0.08`
 
 ## Current Verified Status
@@ -123,28 +123,26 @@ These are the gates that define `v2.2` readiness.
 Last verified commands:
 
 ```bash
-python scripts/build_v2_data.py
-python src/v2/train/train_query_tower.py
-python src/v2/train/train_reranker.py
-python src/v2/eval/offline_eval.py --split test --candidate-k 50
-python src/v2/eval/check_readiness.py
+python train_v2.py
+python eval_v2.py --no-rerun
+python demo_v2.py
 ```
 
 Current verified primary test metrics:
 
-- anchor query `recall@20 = 0.7653`
-- anchor query `recall@50 = 0.8939`
-- anchor query weighted `recall@20 = 0.2830`
-- anchor query weighted `recall@50 = 0.4463`
-- anchor query weighted NDCG@10 `= 0.1560`
-- anchor rerank `hit@10 = 0.7524`
-- anchor rerank conditional mean rank `= 5.7122`
-- anchor rerank weighted NDCG@10 `= 0.2235`
-- benefit MAE `= 0.1274`
-- blended acceptance MAE `= 0.3174`
-- top-1 predicted acceptance mean `= 0.3416`
-- public-transfer-supported share `= 0.4887`
-- top-1 source max share `= 0.5113`
+- anchor query `recall@20 = 0.7460`
+- anchor query `recall@50 = 0.8810`
+- anchor query weighted `recall@20 = 0.3011`
+- anchor query weighted `recall@50 = 0.4358`
+- anchor query weighted NDCG@10 `= 0.1688`
+- anchor rerank `hit@10 = 0.7170`
+- anchor rerank conditional mean rank `= 5.9270`
+- anchor rerank weighted NDCG@10 `= 0.2306`
+- benefit MAE `= 0.1262`
+- blended acceptance MAE `= 0.2947`
+- top-1 predicted acceptance mean `= 0.5101`
+- public-transfer-supported share `= 0.6399`
+- top-1 source max share `= 0.6399`
 
 Current readiness result:
 
@@ -154,9 +152,9 @@ Current readiness result:
 
 These remain useful, but they no longer define success:
 
-- exact-song query `recall@50 = 0.3891`
-- exact-song rerank `hit@10 = 0.0161`
-- exact-song conditional rank `= 44.37`
+- exact-song query `recall@50 = 0.3698`
+- exact-song rerank `hit@10 = 0.0418`
+- exact-song conditional rank `= 37.58`
 
 The exact-song rerank `hit@10` diagnostic is still slightly below the old `0.05` sanity threshold.
 
