@@ -65,6 +65,26 @@ def print_goal_breakdown(goal_breakdown: dict[str, dict[str, float]]) -> None:
     print()
 
 
+def print_baselines(baselines: dict) -> None:
+    print("Baselines (95% CI: bootstrap over test users)")
+    print("-" * 96)
+    print("Tier-3 positives are defined by goal, train success, and closeness in the kNN feature space,")
+    print("so the kNN / success baselines partly replicate the labelling rule.")
+    print(f"{'Retrieval method':<30} {'recall@20':>22} {'weighted recall@20':>22}")
+    for method, entry in baselines["retrieval"].items():
+        r_lo, r_hi = entry["recall_at_20_ci95"]
+        w_lo, w_hi = entry["weighted_recall_at_20_ci95"]
+        print(
+            f"{method:<30} {entry['recall_at_20']:>8.3f} [{r_lo:.2f}, {r_hi:.2f}]"
+            f" {entry['weighted_recall_at_20']:>8.3f} [{w_lo:.2f}, {w_hi:.2f}]"
+        )
+    print(f"{'Rerank method (same top-50)':<30} {'hit@10':>22}")
+    for method, entry in baselines["rerank"].items():
+        lo, hi = entry["hit_at_10_ci95"]
+        print(f"{method:<30} {entry['hit_at_10']:>8.3f} [{lo:.2f}, {hi:.2f}]")
+    print()
+
+
 def save_figures(offline_eval: dict, output_dir: Path) -> list[Path]:
     try:
         import matplotlib.pyplot as plt
@@ -196,6 +216,7 @@ def main() -> None:
     if not args.no_rerun:
         run_command([sys.executable, "src/v2/eval/offline_eval.py", "--split", "test", "--candidate-k", str(args.candidate_k)])
         run_command([sys.executable, "src/v2/eval/check_readiness.py"])
+        run_command([sys.executable, "src/v2/eval/baselines.py", "--split", "test", "--candidate-k", str(args.candidate_k)])
 
     offline_eval = load_json(MODELS_DIR / "offline_eval_v2.json")
     readiness = load_json(MODELS_DIR / "v2_readiness.json")
@@ -210,6 +231,13 @@ def main() -> None:
 
     print_primary_metrics(offline_eval["primary_metrics"])
     print_goal_breakdown(offline_eval["goal_breakdown"])
+
+    baselines_path = MODELS_DIR / "baselines_v2.json"
+    if baselines_path.exists():
+        print_baselines(load_json(baselines_path))
+    else:
+        print("Baselines: not found. Run `python src/v2/eval/baselines.py`.")
+        print()
 
     print("Top-1 Source Distribution")
     print("-" * 96)
@@ -236,6 +264,7 @@ def main() -> None:
     print("-" * 96)
     print(f"- {MODELS_DIR / 'offline_eval_v2.json'}")
     print(f"- {MODELS_DIR / 'v2_readiness.json'}")
+    print(f"- {baselines_path}")
     figure_dir = (PROJECT_ROOT / args.figures_dir).resolve()
     paths = save_figures(offline_eval, figure_dir)
     print(f"- {figure_dir} ({len(paths)} figures)")
