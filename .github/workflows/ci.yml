@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: |
+          uv venv --python 3.13 .venv
+          # CPU-only torch keeps the install small; no GPU on CI runners.
+          uv pip install --python .venv torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install --python .venv -r requirements.txt pytest
+
+      # Lint is scoped to files that are already clean; the older code has
+      # pre-existing ruff findings that should be fixed in a separate PR.
+      - name: Ruff
+        run: |
+          uvx ruff check src/v2/eval/baselines.py tests/
+          uvx ruff format --check src/v2/eval/baselines.py tests/
+
+      # Tests do not need the raw datasets (data/ is gitignored).
+      - name: Pytest
+        run: .venv/bin/python -m pytest tests/ -q
