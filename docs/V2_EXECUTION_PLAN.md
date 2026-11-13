@@ -160,7 +160,11 @@ The exact-song rerank `hit@10` diagnostic is still slightly below the old `0.05`
 
 ## What To Do Next
 
+Baselines (`src/v2/eval/baselines.py`, see `docs/PROJECT_STATE.md`) show the learned retriever is not clearly above a no-context "best train success within goal" baseline, and the learned reranker is below sorting by train success. Several readiness gates are close to chance (random within goal reaches recall@20 `0.369` vs the `0.20` gate).
+
 If work resumes on `v2.2`, the next highest-value steps are:
+
+0. define anchor positives without the same features used for retrieval baselines (or evaluate on held-out outcome-based relevance) so the learned stages can be compared fairly, and add baseline-relative readiness gates
 
 1. improve public-transfer quality with a learned transfer scorer instead of relying only on heuristic support-weighting
 2. decide whether DEAM should be added for public-song affect representation after the stricter contract is stable

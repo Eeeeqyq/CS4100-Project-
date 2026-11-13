@@ -1,6 +1,6 @@
 # Project State
 
-Last updated: 2026-04-17
+Last updated: 2026-11-12
 
 Rule: after any meaningful implementation change, update this file in the same work session. If the public workflow or user-facing commands changed, update `README.md` too.
 
@@ -554,6 +554,37 @@ Important caveat:
 - the primary `v2.2` contract now passes after rerunning the full rebuilt Block B and recalibrating the public-transfer threshold
 - the legacy exact-song rerank `hit@10` diagnostic is still below the old `0.05` sanity threshold, but it is now much closer at `0.0418`
 
+### Current V2.2 baseline truth
+
+`src/v2/eval/baselines.py` (run by `eval_v2.py`, writes `models/rebuild/baselines_v2.json`) evaluates simple alternatives on the same test rows with the same metric functions as `offline_eval.py`. Tests: `python -m pytest tests/`.
+
+Last verified run (2026-11-12, test split, 311 rows, 5 users, 95% CI = bootstrap over users):
+
+- retrieval recall@20 / weighted recall@20:
+  - learned query tower: `0.746` [0.64, 0.81] / `0.301` [0.23, 0.35]
+  - random over all anchors: `0.117` / `0.025`
+  - random within router goal: `0.369` / `0.118`
+  - best train success within goal (no context): `0.707` [0.67, 0.81] / `0.372` [0.32, 0.47]
+  - kNN within goal on `anchor_context_features.npy`: `0.904` [0.78, 0.97] / `0.481` [0.38, 0.55]
+- reranking hit@10 over the same learned top-50:
+  - query order: `0.595`
+  - learned reranker: `0.717` [0.64, 0.75]
+  - sort by train anchor success: `0.871` [0.78, 0.91]
+  - sort by context distance: `0.765` [0.67, 0.81]
+
+Interpretation:
+
+- tier-3 positives are defined by goal, train success, and closeness in the same 15-D context space, so the kNN / success baselines partly replicate the labelling rule (label circularity)
+- the learned retriever is not clearly better than the no-context success baseline, and the learned reranker is worse than sorting by train success
+
+Other verified V2.2 caveats:
+
+- every decision row has `goal_source = router_fallback`; offline eval never passes `--explicit-goal`
+- benefit / acceptance MAE are measured against candidate train anchors' recorded outcomes, which are also reranker inputs
+- the `0.72` transfer threshold is hardcoded in `recommend.py`; `transfer_threshold_tuning.json` sweeps only `0.62`-`0.72` on val and `0.72` is the only value passing the source-share gate; no script in the repo regenerates that file
+- `train_reranker.py` applies the val calibration twice when reporting its final metrics (calibration written into the model, then passed again to `evaluate_split`); `offline_eval_v2.json` is unaffected
+- `recommend.py` public candidates store transfer support in `benefit_hat` and taste fit in `accept_hat`
+
 ### Supporting encoder truth
 
 Supporting encoder artifacts still exist under `src/v2/models/` and `src/v2/train/`:
@@ -639,6 +670,10 @@ These numbers are only valid until the next retrain.
 
 ## Known Caveats
 
+- `MusicEnv` is one-step (`done=True`), so the DQN is effectively a contextual bandit; `GAMMA` and the target network do not affect learning
+- all v1 policies are scored with the same train-fit reward model the DQN optimizes; there is no off-policy evaluation against logged test outcomes
+- when `pre_emotion_mask = 0`, the pre-valence / pre-arousal slots are still filled, so the no-check-in path is not neutral
+
 - The HMM still reflects physical-context energy more than deep internal psychology.
 - DQN currently remains slightly below the state-prior baseline on held-out combined reward, even though it clearly beats trivial baselines.
 - Action usage is still concentrated in a small subset of buckets because the underlying data is highly imbalanced.
@@ -646,6 +681,14 @@ These numbers are only valid until the next retrain.
 - PMEmo helps retrieval, not the core intervention-outcome claim.
 - PMEmo dynamic features currently improve PMEmo internal ordering more than overall top-of-list visibility because Spotify remains dominant in the merged catalog.
 - The no-check-in path is supported in the state interface, but it has not been separately benchmarked as a standalone deployment mode.
+
+## Setup Truth
+
+- verified environment: Python 3.13 with `uv venv --python 3.13 .venv` and `uv pip install --python .venv -r requirements.txt`
+- `requirements.txt` now includes `matplotlib` (needed by `eval_v2.py` figures)
+- SiTunes must be cloned to `data/raw/situnes` (the repo contains its own `SiTunes/` subfolder)
+- `v2.2` depends on `python -m src.data.preprocess`: `train_user_encoder.py` reads `data/processed/split_manifest.json`; verified on a fresh clone that `train_v2.py`'s user-encoder step fails without it and passes with it
+- PMEmo `annotations/static_annotations_std.csv` is required when PMEmo is present; a missing `EDA/` folder is silently skipped
 
 ## Current Documentation Policy
 
